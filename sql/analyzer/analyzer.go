@@ -363,15 +363,30 @@ func (a *Analyzer) Analyze(ctx *sql.Context, n sql.Node, scope *Scope) (sql.Node
 func (a *Analyzer) PrepareQuery(ctx *sql.Context, n sql.Node, scope *Scope) (sql.Node, error) {
 	rule_sel := func(n string) bool {
 		switch n {
-		case "in_subquery_indexes",
+		case "resolve_insert_rows",
+			"insert_topn",
+			"in_subquery_indexes",
 			"track_process",
 			"parallelize",
 			"clear_warnings",
 			"strip_decorations",
-			"unresolve_tables":
+			"unresolve_tables",
+			validateResolvedRule,
+			validateOrderByRule,
+			validateGroupByRule,
+			validateSchemaSourceRule,
+			validateIndexCreationRule,
+			validateOperandsRule,
+			validateCaseResultTypesRule,
+			validateIntervalUsageRule,
+			validateExplodeUsageRule,
+			validateSubqueryColumnsRule,
+			validateUnionSchemasMatchRule,
+			validateAggregationsRule:
 			return false
+		default:
+			return true
 		}
-		return true
 	}
 	return a.analyzeWithSelector(ctx, n, scope, SelectAll, rule_sel)
 }
@@ -398,10 +413,11 @@ func (a *Analyzer) AnalyzePrepared(ctx *sql.Context, n sql.Node, scope *Scope) (
 			"qualify_columns",
 			"resolve_columns",
 
+			"pushdown_filters",
 			"subquery_indexes",
 			"in_subquery_indexes",
-			"pushdown_filters",
-
+			//"insert_topn",
+			"resolve_insert_rows",
 
 			"track_process",
 			"parallelize",

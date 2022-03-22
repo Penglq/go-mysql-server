@@ -64,38 +64,45 @@ func resolveTables(ctx *sql.Context, a *Analyzer, n sql.Node, scope *Scope, sel 
 	})
 }
 
-func resolveTable(ctx *sql.Context, t *plan.UnresolvedTable, a *Analyzer) (sql.Node, error) {
+func resolveTable(ctx *sql.Context, t sql.VersionedTable, a *Analyzer) (sql.Node, error) {
 	name := t.Name()
-	db := t.Database
+	db := t.Database()
 	if db == "" {
 		db = ctx.GetCurrentDatabase()
 	}
 
-	if t.AsOf != nil {
-		// This is necessary to use functions in AS OF expressions. Because function resolution happens after table
-		// resolution, we resolve any functions in the AsOf here in order to evaluate them immediately. A better solution
-		// might be to defer evaluating the expression until later in the analysis, but that requires bigger changes.
-		asOfExpr, err := expression.TransformUp(t.AsOf, resolveFunctionsInExpr(ctx, a))
-		if err != nil {
-			return nil, err
-		}
+	var asofBindVar bool
+	if t.AsOf() != nil {
+		asofBindVar = expression.InspectUp(t.AsOf(), func(expr sql.Expression) bool {
+			_, ok := expr.(*expression.BindVar)
+			return ok
+		})
+		if !asofBindVar {
+			// This is necessary to use functions in AS OF expressions. Because function resolution happens after table
+			// resolution, we resolve any functions in the asOf here in order to evaluate them immediately. A better solution
+			// might be to defer evaluating the expression until later in the analysis, but that requires bigger changes.
+			asOfExpr, err := expression.TransformUp(t.AsOf(), resolveFunctionsInExpr(ctx, a))
+			if err != nil {
+				return nil, err
+			}
 
-		if !asOfExpr.Resolved() {
-			return nil, sql.ErrInvalidAsOfExpression.New(asOfExpr.String())
-		}
+			if !asOfExpr.Resolved() {
+				return nil, sql.ErrInvalidAsOfExpression.New(asOfExpr.String())
+			}
 
-		asOf, err := asOfExpr.Eval(ctx, nil)
-		if err != nil {
-			return nil, err
-		}
+			asOf, err := asOfExpr.Eval(ctx, nil)
+			if err != nil {
+				return nil, err
+			}
 
-		rt, database, err := a.Catalog.TableAsOf(ctx, db, name, asOf)
-		if err != nil {
-			return handleTableLookupFailure(err, name, db, a, t)
-		}
+			rt, database, err := a.Catalog.TableAsOf(ctx, db, name, asOf)
+			if err != nil {
+				return handleTableLookupFailure(err, name, db, a, t)
+			}
 
-		a.Log("table resolved: %q as of %s", rt.Name(), asOf)
-		return plan.NewResolvedTable(rt, database, asOf), nil
+			a.Log("table resolved: %q as of %s", rt.Name(), asOf)
+			return plan.NewResolvedTable(rt, database, asOf), nil
+		}
 	}
 
 	rt, database, err := a.Catalog.Table(ctx, db, name)
@@ -104,7 +111,11 @@ func resolveTable(ctx *sql.Context, t *plan.UnresolvedTable, a *Analyzer) (sql.N
 	}
 
 	a.Log("table resolved: %s", t.Name())
-	return plan.NewResolvedTable(rt, database, nil), nil
+	res := plan.NewResolvedTable(rt, database, nil)
+	if asofBindVar {
+		return plan.NewDeferredAsOfTable(res, t.AsOf()), nil
+	}
+	return res, nil
 }
 
 // setTargetSchemas fills in the target schema for any nodes in the tree that operate on a table node but also want to
@@ -128,7 +139,7 @@ func setTargetSchemas(ctx *sql.Context, a *Analyzer, n sql.Node, scope *Scope, s
 	})
 }
 
-func handleTableLookupFailure(err error, tableName string, dbName string, a *Analyzer, t *plan.UnresolvedTable) (sql.Node, error) {
+func handleTableLookupFailure(err error, tableName string, dbName string, a *Analyzer, t sql.VersionedTable) (sql.Node, error) {
 	if sql.ErrDatabaseNotFound.Is(err) {
 		if tableName == dualTableName {
 			a.Log("table resolved: %q", t.Name())
@@ -152,30 +163,36 @@ func handleTableLookupFailure(err error, tableName string, dbName string, a *Ana
 // table scans.
 func unresolveTables(ctx *sql.Context, a *Analyzer, node sql.Node, scope *Scope, sel RuleSelector) (sql.Node, error) {
 	return plan.TransformUp(node, func(n sql.Node) (sql.Node, error) {
-		var t *plan.ResolvedTable
+		var (
+			from *plan.ResolvedTable
+			to   sql.Node
+			db   string
+			err  error
+		)
 		switch n := n.(type) {
 		case *plan.ResolvedTable:
-			t = n
+			from = n
+			if n.Database != nil {
+				db = n.Database.Name()
+			}
+			to, err = resolveTable(ctx, plan.NewUnresolvedTable(n.Name(), db), a)
 		case *plan.IndexedTableAccess:
-			t = n.ResolvedTable
+			from = n.ResolvedTable
+			if n.Database != nil {
+				db = n.Database.Name()
+			}
+			to, err = resolveTable(ctx, plan.NewUnresolvedTable(n.Table.Name(), db), a)
+		case *plan.DeferredAsOfTable:
+			from = n.ResolvedTable
+			to, err = resolveTable(ctx, plan.NewDeferredAsOfTable(n.ResolvedTable, n.AsOf()), a)
 		default:
 			return n, nil
 		}
-		var table string
-		if t.Table != nil {
-			table = t.Table.Name()
-		}
-		var db string
-		if t.Database != nil {
-			db = t.Database.Name()
-		}
-
-		rt, err := resolveTable(ctx, plan.NewUnresolvedTable(table, db), a)
 		if err != nil {
 			return nil, err
 		}
 
-		new := transferProjections(t, rt.(*plan.ResolvedTable))
+		new := transferProjections(from, to.(*plan.ResolvedTable))
 		return new, nil
 	})
 }

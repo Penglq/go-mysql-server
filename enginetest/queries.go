@@ -30,6 +30,7 @@ type QueryTest struct {
 	Expected        []sql.Row
 	ExpectedColumns sql.Schema // only Name and Type matter here, because that's what we send on the wire
 	Bindings        map[string]sql.Expression
+	SkipPrepared    bool
 }
 
 var SpatialQueryTests = []QueryTest{
@@ -2950,6 +2951,7 @@ var QueryTests = []QueryTest{
 		},
 	},
 	{
+		SkipPrepared: true,
 		Query: `select pk,
 					   first_value(pk) over (order by pk desc),
 					   lag(pk, 1) over (order by pk desc),

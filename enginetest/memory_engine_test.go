@@ -133,7 +133,7 @@ func TestSingleQuery(t *testing.T) {
 	var test enginetest.QueryTest
 	test = enginetest.QueryTest{
 		Query: `
-SELECT TRIM("   foo   ")`,
+SELECT i FROM (SELECT 1 AS i FROM DUAL UNION SELECT 2 AS i FROM DUAL) some_is WHERE i NOT IN (SELECT i FROM (SELECT 1 as i FROM DUAL) different_is)`,
 		Expected: []sql.Row{
 			{1, "first row"},
 			{2, "second row"},
@@ -239,6 +239,22 @@ func TestVersionedQueries(t *testing.T) {
 	}
 }
 
+func TestVersionedQueriesPrepared(t *testing.T) {
+	//t.Skip()
+	for _, numPartitions := range numPartitionsVals {
+		for _, indexInit := range indexBehaviors {
+			for _, parallelism := range parallelVals {
+				testName := fmt.Sprintf("partitions=%d,indexes=%v,parallelism=%v", numPartitions, indexInit.name, parallelism)
+				harness := enginetest.NewMemoryHarness(testName, parallelism, numPartitions, indexInit.nativeIndexes, indexInit.driverInitializer)
+
+				t.Run(testName, func(t *testing.T) {
+					enginetest.TestVersionedQueriesPrepared(t, harness)
+				})
+			}
+		}
+	}
+}
+
 // Tests of choosing the correct execution plan independent of result correctness. Mostly useful for confirming that
 // the right indexes are being used for joining tables.
 func TestQueryPlans(t *testing.T) {
@@ -334,6 +350,10 @@ func TestInfoSchema(t *testing.T) {
 	enginetest.TestInfoSchema(t, enginetest.NewMemoryHarness("default", 1, testNumPartitions, true, mergableIndexDriver))
 }
 
+func TestInfoSchemaPrepared(t *testing.T) {
+	enginetest.TestInfoSchemaPrepared(t, enginetest.NewMemoryHarness("default", 1, testNumPartitions, true, mergableIndexDriver))
+}
+
 func TestReadOnlyDatabases(t *testing.T) {
 	enginetest.TestReadOnlyDatabases(t, enginetest.NewMemoryHarness("default", 1, testNumPartitions, true, mergableIndexDriver))
 }
@@ -402,8 +422,8 @@ func TestSpatialUpdate(t *testing.T) {
 	enginetest.TestSpatialUpdate(t, enginetest.NewMemoryHarness("default", 1, testNumPartitions, true, mergableIndexDriver))
 }
 
-func TestDeleteFrom(t *testing.T) {
-	enginetest.TestDelete(t, enginetest.NewMemoryHarness("default", 1, testNumPartitions, true, mergableIndexDriver))
+func TestWriteQueriesPrepared(t *testing.T) {
+	enginetest.TestWriteQueriesPrepared(t, enginetest.NewMemoryHarness("default", 1, testNumPartitions, true, mergableIndexDriver))
 }
 
 func TestDeleteFromErrors(t *testing.T) {
@@ -418,6 +438,10 @@ func TestTruncate(t *testing.T) {
 	enginetest.TestTruncate(t, enginetest.NewMemoryHarness("default", 1, testNumPartitions, true, mergableIndexDriver))
 }
 
+func TestDeleteFrom(t *testing.T) {
+	enginetest.TestDelete(t, enginetest.NewMemoryHarness("default", 1, testNumPartitions, true, mergableIndexDriver))
+}
+
 func TestScripts(t *testing.T) {
 	//TODO: when foreign keys are implemented in the memory table, we can do the following test
 	for i := len(enginetest.ScriptTests) - 1; i >= 0; i-- {
@@ -426,6 +450,16 @@ func TestScripts(t *testing.T) {
 		}
 	}
 	enginetest.TestScripts(t, enginetest.NewMemoryHarness("default", 1, testNumPartitions, true, mergableIndexDriver))
+}
+
+func TestScriptsPrepared(t *testing.T) {
+	//TODO: when foreign keys are implemented in the memory table, we can do the following test
+	for i := len(enginetest.ScriptTests) - 1; i >= 0; i-- {
+		if enginetest.ScriptTests[i].Name == "failed statements data validation for DELETE, REPLACE" {
+			enginetest.ScriptTests = append(enginetest.ScriptTests[:i], enginetest.ScriptTests[i+1:]...)
+		}
+	}
+	enginetest.TestPreparedScripts(t, enginetest.NewMemoryHarness("default", 1, testNumPartitions, true, mergableIndexDriver))
 }
 
 func TestUserPrivileges(t *testing.T) {
@@ -536,6 +570,10 @@ func TestExplode(t *testing.T) {
 	enginetest.TestExplode(t, enginetest.NewDefaultMemoryHarness())
 }
 
+func TestExplodePrepared(t *testing.T) {
+	enginetest.TestExplodePrepared(t, enginetest.NewDefaultMemoryHarness())
+}
+
 func TestReadOnly(t *testing.T) {
 	enginetest.TestReadOnly(t, enginetest.NewDefaultMemoryHarness())
 }
@@ -544,8 +582,17 @@ func TestViews(t *testing.T) {
 	enginetest.TestViews(t, enginetest.NewDefaultMemoryHarness())
 }
 
+func TestViewsPrepared(t *testing.T) {
+	enginetest.TestViewsPrepared(t, enginetest.NewDefaultMemoryHarness())
+}
+
 func TestVersionedViews(t *testing.T) {
 	enginetest.TestVersionedViews(t, enginetest.NewDefaultMemoryHarness())
+}
+
+func TestVersionedViewsPrepared(t *testing.T) {
+	t.Skip()
+	enginetest.TestVersionedViewsPrepared(t, enginetest.NewDefaultMemoryHarness())
 }
 
 func TestNaturalJoin(t *testing.T) {
@@ -598,6 +645,10 @@ func TestJsonScripts(t *testing.T) {
 
 func TestShowTableStatus(t *testing.T) {
 	enginetest.TestShowTableStatus(t, enginetest.NewDefaultMemoryHarness())
+}
+
+func TestShowTableStatusPrepared(t *testing.T) {
+	enginetest.TestShowTableStatusPrepared(t, enginetest.NewDefaultMemoryHarness())
 }
 
 func TestAddDropPks(t *testing.T) {

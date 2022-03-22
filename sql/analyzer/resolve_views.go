@@ -35,7 +35,7 @@ func resolveViews(ctx *sql.Context, a *Analyzer, n sql.Node, scope *Scope, sel R
 		}
 
 		viewName := urt.Name()
-		dbName := urt.Database
+		dbName := urt.Database()
 		if dbName == "" {
 			dbName = ctx.GetCurrentDatabase()
 		}
@@ -88,16 +88,16 @@ func resolveViews(ctx *sql.Context, a *Analyzer, n sql.Node, scope *Scope, sel R
 		query := view.Definition().Children()[0]
 
 		// If this view is being asked for with an AS OF clause, then attempt to apply it to every table in the view.
-		if urt.AsOf != nil {
-			query, err = applyAsOfToView(query, a, urt.AsOf)
+		if urt.AsOf() != nil {
+			query, err = applyAsOfToView(query, a, urt.AsOf())
 			if err != nil {
 				return nil, err
 			}
 		}
 
 		// If the view name was qualified with a database name, apply that same qualifier to any tables in it
-		if urt.Database != "" {
-			query, err = applyDatabaseQualifierToView(query, a, urt.Database)
+		if urt.Database() != "" {
+			query, err = applyDatabaseQualifierToView(query, a, urt.Database())
 			if err != nil {
 				return nil, err
 			}
@@ -117,10 +117,10 @@ func applyAsOfToView(n sql.Node, a *Analyzer, asOf sql.Expression) (sql.Node, er
 		}
 
 		a.Log("applying AS OF clause to view " + urt.Name())
-		if urt.AsOf != nil {
+		if urt.AsOf() != nil {
 			return nil, sql.ErrIncompatibleAsOf.New(
 				fmt.Sprintf("cannot combine AS OF clauses %s and %s",
-					asOf.String(), urt.AsOf.String()))
+					asOf.String(), urt.AsOf().String()))
 		}
 
 		return urt.WithAsOf(asOf)
@@ -137,7 +137,7 @@ func applyDatabaseQualifierToView(n sql.Node, a *Analyzer, dbName string) (sql.N
 		}
 
 		a.Log("applying database name to view table " + urt.Name())
-		if urt.Database == "" {
+		if urt.Database() == "" {
 			return urt.WithDatabase(dbName)
 		}
 
