@@ -15,6 +15,7 @@
 package parse
 
 import (
+	"encoding/hex"
 	goerrors "errors"
 	"fmt"
 	"strconv"
@@ -22,6 +23,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/dolthub/vitess/go/mysql"
 	"github.com/dolthub/vitess/go/vt/sqlparser"
 	"github.com/opentracing/opentracing-go"
 	"gopkg.in/src-d/go-errors.v1"
@@ -57,6 +59,7 @@ const (
 	colKeyUnique
 	colKeyUniqueKey
 	colKey
+	colKeyFulltextKey
 )
 
 func mustCastNumToInt64(x interface{}) int64 {
@@ -179,7 +182,7 @@ func convert(ctx *sql.Context, stmt sqlparser.Statement, query string) (sql.Node
 	case *sqlparser.MultiAlterDDL:
 		return convertMultiAlterDDL(ctx, query, n)
 	case *sqlparser.DBDDL:
-		return convertDBDDL(n)
+		return convertDBDDL(ctx, n)
 	case *sqlparser.Explain:
 		return convertExplain(ctx, n)
 	case *sqlparser.Insert:
@@ -227,7 +230,6 @@ func convert(ctx *sql.Context, stmt sqlparser.Statement, query string) (sql.Node
 		return convertLockTables(ctx, n)
 	case *sqlparser.UnlockTables:
 		return convertUnlockTables(ctx, n)
-
 	case *sqlparser.CreateUser:
 		return convertCreateUser(ctx, n)
 	case *sqlparser.RenameUser:
@@ -269,6 +271,8 @@ func convert(ctx *sql.Context, stmt sqlparser.Statement, query string) (sql.Node
 		return convertShowGrants(ctx, n)
 	case *sqlparser.ShowPrivileges:
 		return plan.NewShowPrivileges(), nil
+	case *sqlparser.Flush:
+		return convertFlush(ctx, n)
 	}
 }
 
@@ -898,9 +902,16 @@ func convertMultiAlterDDL(ctx *sql.Context, query string, c *sqlparser.MultiAlte
 	return plan.NewBlock(statements), nil
 }
 
-func convertDBDDL(c *sqlparser.DBDDL) (sql.Node, error) {
+func convertDBDDL(ctx *sql.Context, c *sqlparser.DBDDL) (sql.Node, error) {
 	switch strings.ToLower(c.Action) {
 	case sqlparser.CreateStr:
+		if len(c.CharsetCollate) > 0 {
+			ctx.Session.Warn(&sql.Warning{
+				Level:   "Warning",
+				Code:    mysql.ERNotSupportedYet,
+				Message: fmt.Sprintf("Setting CHARACTER SET, COLLATION and ENCRYPTION are not supported yet"),
+			})
+		}
 		return plan.NewCreateDatabase(c.DBName, c.IfNotExists), nil
 	case sqlparser.DropStr:
 		return plan.NewDropDatabase(c.DBName, c.IfExists), nil
@@ -1211,17 +1222,17 @@ func convertAlterTable(ctx *sql.Context, ddl *sqlparser.DDL) (sql.Node, error) {
 			if err != nil {
 				return nil, err
 			}
-			return plan.NewAddColumn(sql.UnresolvedDatabase(""), tableNameToUnresolvedTable(ddl.Table), sch.Schema[0], columnOrderToColumnOrder(ddl.ColumnOrder)), nil
+			return plan.NewAddColumn(tableNameToUnresolvedTable(ddl.Table), sch.Schema[0], columnOrderToColumnOrder(ddl.ColumnOrder)), nil
 		case sqlparser.DropStr:
-			return plan.NewDropColumn(sql.UnresolvedDatabase(""), tableNameToUnresolvedTable(ddl.Table), ddl.Column.String()), nil
+			return plan.NewDropColumn(tableNameToUnresolvedTable(ddl.Table), ddl.Column.String()), nil
 		case sqlparser.RenameStr:
-			return plan.NewRenameColumn(sql.UnresolvedDatabase(""), tableNameToUnresolvedTable(ddl.Table), ddl.Column.String(), ddl.ToColumn.String()), nil
+			return plan.NewRenameColumn(tableNameToUnresolvedTable(ddl.Table), ddl.Column.String(), ddl.ToColumn.String()), nil
 		case sqlparser.ModifyStr, sqlparser.ChangeStr:
 			sch, err := TableSpecToSchema(nil, ddl.TableSpec)
 			if err != nil {
 				return nil, err
 			}
-			return plan.NewModifyColumn(sql.UnresolvedDatabase(""), tableNameToUnresolvedTable(ddl.Table), ddl.Column.String(), sch.Schema[0], columnOrderToColumnOrder(ddl.ColumnOrder)), nil
+			return plan.NewModifyColumn(tableNameToUnresolvedTable(ddl.Table), ddl.Column.String(), sch.Schema[0], columnOrderToColumnOrder(ddl.ColumnOrder)), nil
 		}
 	}
 	if ddl.AutoIncSpec != nil {
@@ -1256,7 +1267,7 @@ func convertAlterIndex(ctx *sql.Context, ddl *sqlparser.DDL) (sql.Node, error) {
 		case sqlparser.UniqueStr:
 			constraint = sql.IndexConstraint_Unique
 		case sqlparser.FulltextStr:
-			constraint = sql.IndexConstraint_Fulltext
+			return nil, sql.ErrUnsupportedFeature.New("fulltext keys are unsupported")
 		case sqlparser.SpatialStr:
 			constraint = sql.IndexConstraint_Spatial
 		case sqlparser.PrimaryStr:
@@ -1303,6 +1314,10 @@ func convertAlterIndex(ctx *sql.Context, ddl *sqlparser.DDL) (sql.Node, error) {
 		return plan.NewAlterDropIndex(table, ddl.IndexSpec.ToName.String()), nil
 	case sqlparser.RenameStr:
 		return plan.NewAlterRenameIndex(table, ddl.IndexSpec.FromName.String(), ddl.IndexSpec.ToName.String()), nil
+	case "disable":
+		return plan.NewAlterDisableEnableKeys(table, true), nil
+	case "enable":
+		return plan.NewAlterDisableEnableKeys(table, false), nil
 	default:
 		return nil, sql.ErrUnsupportedFeature.New(sqlparser.String(ddl))
 	}
@@ -1384,11 +1399,16 @@ func columnOrderToColumnOrder(order *sqlparser.ColumnOrder) *sql.ColumnOrder {
 }
 
 func convertDropTable(ctx *sql.Context, c *sqlparser.DDL) (sql.Node, error) {
-	tableNames := make([]string, len(c.FromTables))
+	dropTables := make([]sql.Node, len(c.FromTables))
+	dbName := c.FromTables[0].Qualifier.String()
 	for i, t := range c.FromTables {
-		tableNames[i] = t.Name.String()
+		if t.Qualifier.String() != dbName {
+			return nil, sql.ErrUnsupportedFeature.New("dropping tables on multiple databases in the same statement")
+		}
+		dropTables[i] = tableNameToUnresolvedTable(t)
 	}
-	return plan.NewDropTable(sql.UnresolvedDatabase(""), c.IfExists, tableNames...), nil
+
+	return plan.NewDropTable(dropTables, c.IfExists), nil
 }
 
 func convertTruncateTable(ctx *sql.Context, c *sqlparser.DDL) (sql.Node, error) {
@@ -1441,7 +1461,6 @@ func convertCreateTable(ctx *sql.Context, c *sqlparser.DDL) (sql.Node, error) {
 
 	var idxDefs []*plan.IndexDefinition
 	for _, idxDef := range c.TableSpec.Indexes {
-		//TODO: add vitess support for FULLTEXT
 		constraint := sql.IndexConstraint_None
 		if idxDef.Info.Primary {
 			constraint = sql.IndexConstraint_Primary
@@ -1449,6 +1468,9 @@ func convertCreateTable(ctx *sql.Context, c *sqlparser.DDL) (sql.Node, error) {
 			constraint = sql.IndexConstraint_Unique
 		} else if idxDef.Info.Spatial {
 			constraint = sql.IndexConstraint_Spatial
+		} else if idxDef.Info.Fulltext {
+			// TODO: We do not support FULLTEXT indexes or keys
+			return nil, sql.ErrUnsupportedFeature.New("fulltext keys are unsupported")
 		}
 
 		columns := make([]sql.IndexColumn, len(idxDef.Columns))
@@ -2181,11 +2203,37 @@ func convertGrantPrivilege(ctx *sql.Context, n *sqlparser.GrantPrivilege) (*plan
 }
 
 func convertShowGrants(ctx *sql.Context, n *sqlparser.ShowGrants) (*plan.ShowGrants, error) {
+	var currentUser bool
 	var user *plan.UserName
 	if n.For != nil {
+		currentUser = false
 		user = &convertAccountName(*n.For)[0]
+	} else {
+		currentUser = true
+		client := ctx.Session.Client()
+		user = &plan.UserName{
+			Name:    client.User,
+			Host:    client.Address,
+			AnyHost: client.Address == "%",
+		}
 	}
-	return plan.NewShowGrants(n.CurrentUser, user, convertAccountName(n.Using...)), nil
+	return plan.NewShowGrants(currentUser, user, convertAccountName(n.Using...)), nil
+}
+
+func convertFlush(ctx *sql.Context, f *sqlparser.Flush) (sql.Node, error) {
+	var writesToBinlog = true
+	switch strings.ToLower(f.Type) {
+	case "no_write_to_binlog", "local":
+		//writesToBinlog = false
+		return nil, fmt.Errorf("%s not supported", f.Type)
+	}
+
+	switch strings.ToLower(f.Option.Name) {
+	case "privileges":
+		return plan.NewFlushPrivileges(writesToBinlog), nil
+	default:
+		return nil, fmt.Errorf("%s not supported", f.Option.Name)
+	}
 }
 
 func columnsToStrings(cols sqlparser.Columns) []string {
@@ -2323,6 +2371,15 @@ func tableExprToTable(
 		default:
 			return nil, sql.ErrUnsupportedSyntax.New(sqlparser.String(te))
 		}
+
+	case *sqlparser.TableFuncExpr:
+		exprs, err := selectExprsToExpressions(ctx, t.Exprs)
+		if err != nil {
+			return nil, err
+		}
+
+		return expression.NewUnresolvedTableFunction(t.Name, exprs), nil
+
 	case *sqlparser.JoinTableExpr:
 		// TODO: add support for using, once we have proper table
 		// qualification of fields
@@ -2402,7 +2459,12 @@ func orderByToSortFields(ctx *sql.Context, ob sqlparser.OrderBy) (sql.SortFields
 			so = sql.Descending
 		}
 
-		sf := sql.SortField{Column: e, Order: so}
+		e2, _ := e.(sql.Expression2)
+		sf := sql.SortField{
+			Column:  e,
+			Column2: e2,
+			Order:   so,
+		}
 		sortFields = append(sortFields, sf)
 	}
 	return sortFields, nil
@@ -2430,10 +2492,7 @@ func havingToHaving(ctx *sql.Context, having *sqlparser.Where, node sql.Node) (s
 	return plan.NewHaving(cond, node), nil
 }
 
-// windowToWindow will apply a WINDOW clause to a plan.Window node,
-// replacing named window references with their window definitions.
-// Performs semantic validation of window compatibility/validity.
-// TODO: separate plan building from replacement and semantic validation
+// windowToWindow wraps a plan.Window node in a plan.NamedWindows node.
 func windowToWindow(ctx *sql.Context, windowDefs sqlparser.Window, window *plan.Window) (sql.Node, error) {
 	newWindowDefs := make(map[string]*sql.WindowDefinition, len(windowDefs))
 	var err error
@@ -2443,126 +2502,7 @@ func windowToWindow(ctx *sql.Context, windowDefs sqlparser.Window, window *plan.
 			return nil, err
 		}
 	}
-
-	// check for circularity
-	var head, tail *sql.WindowDefinition
-	for _, def := range newWindowDefs {
-		if def.Ref == "" {
-			continue
-		}
-		head = def
-		head = newWindowDefs[head.Ref]
-		tail = def
-		for head != nil && tail != nil && head != tail {
-			tail = newWindowDefs[tail.Ref]
-			head = newWindowDefs[head.Ref]
-			if head != nil {
-				head = newWindowDefs[head.Ref]
-			}
-		}
-		if head != nil && head == tail {
-			return nil, sql.ErrCircularWindowInheritance.New()
-		}
-
-	}
-
-	// resolve recursively builds window definitions from nested window refs
-	var resolve func(n *sql.WindowDefinition) (*sql.WindowDefinition, error)
-	resolve = func(n *sql.WindowDefinition) (*sql.WindowDefinition, error) {
-		if n.Ref == "" {
-			return n, nil
-		}
-
-		// resolve ref before merging
-		ref, ok := newWindowDefs[n.Ref]
-		if !ok {
-			return nil, fmt.Errorf("window def not found")
-		}
-		ref, err = resolve(ref)
-		if err != nil {
-			return nil, err
-		}
-		n, err = mergeWindowDefs(n, ref)
-		if err != nil {
-			return nil, err
-		}
-
-		if n.Name != "" {
-			// cache lookup
-			newWindowDefs[n.Name] = n
-		}
-		return n, nil
-	}
-
-	// find and replace over expressions with new window definitions
-	newExprs := make([]sql.Expression, len(window.SelectExprs))
-	for i, expr := range window.SelectExprs {
-		newExprs[i], err = expression.TransformUp(expr, func(e sql.Expression) (sql.Expression, error) {
-			uf, ok := e.(*expression.UnresolvedFunction)
-			if !ok {
-				return e, nil
-			}
-			if uf.Window == nil {
-				return e, nil
-			}
-			newWindow, err := resolve(uf.Window)
-			if err != nil {
-				return nil, err
-			}
-			return uf.WithWindow(newWindow), nil
-		})
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return plan.NewWindow(newExprs, window.Child), nil
-}
-
-// mergeWindowDefs combines the attributes of two window definitions or returns
-// an error if the two are incompatible. [def] should have a reference to
-// [ref] through [def.Ref], and the return value drops the reference to indicate
-// the two were properly combined.
-func mergeWindowDefs(def, ref *sql.WindowDefinition) (*sql.WindowDefinition, error) {
-	if ref.Ref != "" {
-		panic("unreachable; cannot merge unresolved window definition")
-	}
-
-	var orderBy sql.SortFields
-	switch {
-	case len(def.OrderBy) > 0 && len(ref.OrderBy) > 0:
-		return nil, sql.ErrInvalidWindowInheritance.New("", "", "both contain order by clause")
-	case len(def.OrderBy) > 0:
-		orderBy = def.OrderBy
-	case len(ref.OrderBy) > 0:
-		orderBy = ref.OrderBy
-	default:
-	}
-
-	var partitionBy []sql.Expression
-	switch {
-	case len(def.PartitionBy) > 0 && len(ref.PartitionBy) > 0:
-		return nil, sql.ErrInvalidWindowInheritance.New("", "", "both contain partition by clause")
-	case len(def.PartitionBy) > 0:
-		partitionBy = def.PartitionBy
-	case len(ref.PartitionBy) > 0:
-		partitionBy = ref.PartitionBy
-	default:
-		partitionBy = []sql.Expression{}
-	}
-
-	var frame sql.WindowFrame
-	switch {
-	case def.Frame != nil && ref.Frame != nil:
-		return nil, sql.ErrInvalidWindowInheritance.New("", "", "both contain frame clause")
-	case def.Frame != nil:
-		frame = def.Frame
-	case ref.Frame != nil:
-		frame = ref.Frame
-	default:
-	}
-
-	return sql.NewWindowDefinition(partitionBy, orderBy, frame, "", def.Name), nil
+	return plan.NewNamedWindows(newWindowDefs, window), nil
 }
 
 func offsetToOffset(
@@ -3117,7 +3057,13 @@ func convertVal(v *sqlparser.SQLVal) (sql.Expression, error) {
 			v = strings.Trim(v[1:], "'")
 		}
 
-		return convertInt(v, 16)
+		valBytes := []byte(v)
+		dst := make([]byte, hex.DecodedLen(len(valBytes)))
+		_, err := hex.Decode(dst, valBytes)
+		if err != nil {
+			return nil, err
+		}
+		return expression.NewLiteral(dst, sql.LongBlob), nil
 	case sqlparser.HexVal:
 		val, err := v.HexDecode()
 		if err != nil {

@@ -128,6 +128,11 @@ func (d *deleteIter) Next(ctx *sql.Context) (sql.Row, error) {
 	if err != nil {
 		return nil, err
 	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
 
 	// Reduce the row to the length of the schema. The length can differ when some update values come from an outer
 	// scope, which will be the first N values in the row.
@@ -164,6 +169,15 @@ func (p *DeleteFrom) WithChildren(children ...sql.Node) (sql.Node, error) {
 		return nil, sql.ErrInvalidChildrenNumber.New(p, len(children), 1)
 	}
 	return NewDeleteFrom(children[0]), nil
+}
+
+// CheckPrivileges implements the interface sql.Node.
+func (p *DeleteFrom) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
+	//TODO: If column values are retrieved then the SELECT privilege is required
+	// For example: "DELETE FROM table WHERE z > 0"
+	// We would need SELECT privileges on the "z" column as it's retrieving values
+	return opChecker.UserHasPrivileges(ctx,
+		sql.NewPrivilegedOperation(p.Database(), getTableName(p.Child), "", sql.PrivilegeType_Delete))
 }
 
 func (p DeleteFrom) String() string {

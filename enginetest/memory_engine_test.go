@@ -132,20 +132,16 @@ func TestSingleQuery(t *testing.T) {
 
 	var test enginetest.QueryTest
 	test = enginetest.QueryTest{
-		Query: `
-SELECT i FROM (SELECT 1 AS i FROM DUAL UNION SELECT 2 AS i FROM DUAL) some_is WHERE i NOT IN (SELECT i FROM (SELECT 1 as i FROM DUAL) different_is)`,
-		Expected: []sql.Row{
-			{1, "first row"},
-			{2, "second row"},
-			{3, "third row"},
-		},
+		Query:    `SELECT * FROM datetime_table where date_col = '2020-01-01'`,
+		Expected: []sql.Row{},
 	}
 
 	fmt.Sprintf("%v", test)
-	harness := enginetest.NewMemoryHarness("", 1, testNumPartitions, false, nil)
+	harness := enginetest.NewMemoryHarness("", 1, testNumPartitions, true, nil)
 	engine := enginetest.NewEngine(t, harness)
-	engine.Analyzer.Debug = true
-	engine.Analyzer.Verbose = true
+	enginetest.CreateIndexes(t, harness, engine)
+	//engine.Analyzer.Debug = true
+	//engine.Analyzer.Verbose = true
 
 	enginetest.TestQuery(t, harness, engine, test.Query, test.Expected, nil, test.Bindings)
 }
@@ -172,8 +168,8 @@ func TestSingleScript(t *testing.T) {
 	for _, test := range scripts {
 		harness := enginetest.NewMemoryHarness("", 1, testNumPartitions, true, nil)
 		engine := enginetest.NewEngine(t, harness)
-		engine.Analyzer.Debug = true
-		engine.Analyzer.Verbose = true
+		//engine.Analyzer.Debug = true
+		//engine.Analyzer.Verbose = true
 
 		enginetest.TestScriptWithEngine(t, engine, harness, test)
 	}
@@ -273,6 +269,20 @@ func TestQueryPlans(t *testing.T) {
 	}
 }
 
+func TestIndexQueryPlans(t *testing.T) {
+	indexBehaviors := []*indexBehaviorTestParams{
+		{"nativeIndexes", nil, true},
+		{"nativeAndMergable", mergableIndexDriver, true},
+	}
+
+	for _, indexInit := range indexBehaviors {
+		t.Run(indexInit.name, func(t *testing.T) {
+			harness := enginetest.NewMemoryHarness(indexInit.name, 1, 2, indexInit.nativeIndexes, indexInit.driverInitializer)
+			enginetest.TestIndexQueryPlans(t, harness)
+		})
+	}
+}
+
 // This test will write a new set of query plan expected results to a file that you can copy and paste over the existing
 // query plan results. Handy when you've made a large change to the analyzer or node formatting, and you want to examine
 // how query plans have changed without a lot of manual copying and pasting.
@@ -281,6 +291,7 @@ func TestWriteQueryPlans(t *testing.T) {
 
 	harness := enginetest.NewDefaultMemoryHarness()
 	engine := enginetest.NewEngine(t, harness)
+	enginetest.CreateIndexes(t, harness, engine)
 
 	tmp, err := ioutil.TempDir("", "*")
 	if err != nil {
@@ -294,6 +305,69 @@ func TestWriteQueryPlans(t *testing.T) {
 	w := bufio.NewWriter(f)
 	_, _ = w.WriteString("var PlanTests = []QueryPlanTest{\n")
 	for _, tt := range enginetest.PlanTests {
+		_, _ = w.WriteString("\t{\n")
+		ctx := enginetest.NewContextWithEngine(harness, engine)
+		parsed, err := parse.Parse(ctx, tt.Query)
+		require.NoError(t, err)
+
+		node, err := engine.Analyzer.Analyze(ctx, parsed, nil)
+		require.NoError(t, err)
+		planString := extractQueryNode(node).String()
+
+		if strings.Contains(tt.Query, "`") {
+			_, _ = w.WriteString(fmt.Sprintf(`Query: "%s",`, tt.Query))
+		} else {
+			_, _ = w.WriteString(fmt.Sprintf("Query: `%s`,", tt.Query))
+		}
+		_, _ = w.WriteString("\n")
+
+		_, _ = w.WriteString(`ExpectedPlan: `)
+		for i, line := range strings.Split(planString, "\n") {
+			if i > 0 {
+				_, _ = w.WriteString(" + \n")
+			}
+			if len(line) > 0 {
+				_, _ = w.WriteString(fmt.Sprintf(`"%s\n"`, strings.ReplaceAll(line, `"`, `\"`)))
+			} else {
+				// final line with comma
+				_, _ = w.WriteString("\"\",\n")
+			}
+		}
+		_, _ = w.WriteString("\t},\n")
+	}
+	_, _ = w.WriteString("}")
+
+	_ = w.Flush()
+
+	t.Logf("Query plans in %s", outputPath)
+}
+
+func TestWriteIndexQueryPlans(t *testing.T) {
+	t.Skip()
+
+	harness := enginetest.NewDefaultMemoryHarness()
+	engine := enginetest.NewEngine(t, harness)
+
+	enginetest.CreateIndexes(t, harness, engine)
+	for i, script := range enginetest.ComplexIndexQueries {
+		for _, statement := range script.SetUpScript {
+			statement = strings.Replace(statement, "test", fmt.Sprintf("t%d", i), -1)
+			enginetest.RunQuery(t, engine, harness, statement)
+		}
+	}
+
+	tmp, err := ioutil.TempDir("", "*")
+	if err != nil {
+		return
+	}
+
+	outputPath := filepath.Join(tmp, "indexQueryPlans.txt")
+	f, err := os.Create(outputPath)
+	require.NoError(t, err)
+
+	w := bufio.NewWriter(f)
+	_, _ = w.WriteString("var IndexPlanTests = []QueryPlanTest{\n")
+	for _, tt := range enginetest.IndexPlanTests {
 		_, _ = w.WriteString("\t{\n")
 		ctx := enginetest.NewContextWithEngine(harness, engine)
 		parsed, err := parse.Parse(ctx, tt.Query)
@@ -462,12 +536,20 @@ func TestScriptsPrepared(t *testing.T) {
 	enginetest.TestPreparedScripts(t, enginetest.NewMemoryHarness("default", 1, testNumPartitions, true, mergableIndexDriver))
 }
 
+func TestScriptQueryPlan(t *testing.T) {
+	enginetest.TestScriptQueryPlan(t, enginetest.NewMemoryHarness("default", 1, testNumPartitions, true, mergableIndexDriver))
+}
+
 func TestUserPrivileges(t *testing.T) {
 	enginetest.TestUserPrivileges(t, enginetest.NewMemoryHarness("default", 1, testNumPartitions, true, mergableIndexDriver))
 }
 
 func TestUserAuthentication(t *testing.T) {
 	enginetest.TestUserAuthentication(t, enginetest.NewMemoryHarness("default", 1, testNumPartitions, true, mergableIndexDriver))
+}
+
+func TestPrivilegePersistence(t *testing.T) {
+	enginetest.TestPrivilegePersistence(t, enginetest.NewMemoryHarness("default", 1, testNumPartitions, true, mergableIndexDriver))
 }
 
 func TestComplexIndexQueries(t *testing.T) {
@@ -526,8 +608,12 @@ func TestCreateDatabase(t *testing.T) {
 	enginetest.TestCreateDatabase(t, enginetest.NewDefaultMemoryHarness())
 }
 
-func TestPkOrdinals(t *testing.T) {
-	enginetest.TestPkOrdinals(t, enginetest.NewDefaultMemoryHarness())
+func TestPkOrdinalsDDL(t *testing.T) {
+	enginetest.TestPkOrdinalsDDL(t, enginetest.NewDefaultMemoryHarness())
+}
+
+func TestPkOrdinalsDML(t *testing.T) {
+	enginetest.TestPkOrdinalsDML(t, enginetest.NewDefaultMemoryHarness())
 }
 
 func TestDropDatabase(t *testing.T) {
@@ -653,6 +739,10 @@ func TestShowTableStatusPrepared(t *testing.T) {
 
 func TestAddDropPks(t *testing.T) {
 	enginetest.TestAddDropPks(t, enginetest.NewDefaultMemoryHarness())
+}
+
+func TestNullRanges(t *testing.T) {
+	enginetest.TestNullRanges(t, enginetest.NewDefaultMemoryHarness())
 }
 
 func TestPersist(t *testing.T) {

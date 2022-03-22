@@ -37,6 +37,7 @@ type Index struct {
 }
 
 var _ sql.Index = (*Index)(nil)
+var _ sql.FilteredIndex = (*Index)(nil)
 
 func (idx *Index) Database() string                    { return idx.DB }
 func (idx *Index) Driver() string                      { return idx.DriverName }
@@ -91,6 +92,8 @@ func (idx *Index) NewLookup(ctx *sql.Context, ranges ...sql.Range) (sql.IndexLoo
 				rangeColumnExpr = expression.NewEquals(expression.NewLiteral(1, sql.Int8), expression.NewLiteral(2, sql.Int8))
 			case sql.RangeType_All:
 				rangeColumnExpr = expression.NewEquals(expression.NewLiteral(1, sql.Int8), expression.NewLiteral(1, sql.Int8))
+			case sql.RangeType_Null:
+				rangeColumnExpr = expression.NewIsNull(idx.Exprs[i])
 			case sql.RangeType_GreaterThan:
 				lit, typ := getType(sql.GetRangeCutKey(rce.LowerBound))
 				rangeColumnExpr = expression.NewNullSafeGreaterThan(idx.Exprs[i], expression.NewLiteral(lit, typ))
@@ -180,6 +183,10 @@ func (idx *Index) ID() string {
 }
 
 func (idx *Index) Table() string { return idx.TableName }
+
+func (idx *Index) HandledFilters(filters []sql.Expression) []sql.Expression {
+	return filters
+}
 
 // ExpressionsIndex is an index made out of one or more expressions (usually field expressions), linked to a Table.
 type ExpressionsIndex interface {

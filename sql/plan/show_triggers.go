@@ -96,7 +96,7 @@ func (s *ShowTriggers) RowIter(ctx *sql.Context, row sql.Row) (sql.RowIter, erro
 			tableName,             // Table
 			trigger.BodyString,    // Statement
 			triggerTime,           // Timing
-			time.Unix(0, 0).UTC(), // Created
+			time.Unix(1, 0).UTC(), // Created
 			"",                    // sql_mode
 			"",                    // Definer
 			characterSetClient,    // character_set_client
@@ -110,6 +110,12 @@ func (s *ShowTriggers) RowIter(ctx *sql.Context, row sql.Row) (sql.RowIter, erro
 // WithChildren implements the sql.Node interface.
 func (s *ShowTriggers) WithChildren(children ...sql.Node) (sql.Node, error) {
 	return NillaryWithChildren(s, children...)
+}
+
+// CheckPrivileges implements the interface sql.Node.
+func (s *ShowTriggers) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
+	//TODO: figure out what privileges are needed here
+	return true
 }
 
 // Database implements the sql.Databaser interface.

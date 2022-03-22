@@ -15,6 +15,7 @@
 package enginetest
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"strings"
@@ -36,6 +37,7 @@ import (
 	"github.com/dolthub/go-mysql-server/sql/analyzer"
 	"github.com/dolthub/go-mysql-server/sql/expression"
 	"github.com/dolthub/go-mysql-server/sql/expression/function/aggregation"
+	"github.com/dolthub/go-mysql-server/sql/grant_tables"
 	"github.com/dolthub/go-mysql-server/sql/information_schema"
 	"github.com/dolthub/go-mysql-server/sql/parse"
 	"github.com/dolthub/go-mysql-server/sql/plan"
@@ -162,6 +164,21 @@ func TestInfoSchema(t *testing.T, harness Harness) {
 	for _, script := range InfoSchemaScripts {
 		TestScript(t, harness, script)
 	}
+
+	p := sqle.NewProcessList()
+	sess := sql.NewBaseSessionWithClientServer("localhost", sql.Client{Address: "localhost", User: "root"}, 1)
+	ctx := sql.NewContext(context.Background(), sql.WithPid(1), sql.WithSession(sess), sql.WithProcessList(p))
+
+	ctx, err := p.AddProcess(ctx, "SELECT foo")
+	require.NoError(t, err)
+
+	TestQueryWithContext(t, ctx, engine,
+		"SELECT * FROM information_schema.processlist",
+		[]sql.Row{{1, "root", "localhost", "NULL", "Query", 0, "processlist(processlist (0/? partitions))", "SELECT foo"}},
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
 }
 
 func CreateIndexes(t *testing.T, harness Harness, engine *sqle.Engine) {
@@ -228,6 +245,26 @@ func TestQueryPlans(t *testing.T, harness Harness) {
 	CreateIndexes(t, harness, engine)
 	createForeignKeys(t, harness, engine)
 	for _, tt := range PlanTests {
+		t.Run(tt.Query, func(t *testing.T) {
+			TestQueryPlan(t, NewContextWithEngine(harness, engine), engine, harness, tt.Query, tt.ExpectedPlan)
+		})
+	}
+}
+
+func TestIndexQueryPlans(t *testing.T, harness Harness) {
+	engine := NewEngine(t, harness)
+	defer engine.Close()
+
+	CreateIndexes(t, harness, engine)
+	createForeignKeys(t, harness, engine)
+	for i, script := range ComplexIndexQueries {
+		for _, statement := range script.SetUpScript {
+			statement = strings.Replace(statement, "test", fmt.Sprintf("t%d", i), -1)
+			RunQuery(t, engine, harness, statement)
+		}
+	}
+
+	for _, tt := range IndexPlanTests {
 		t.Run(tt.Query, func(t *testing.T) {
 			TestQueryPlan(t, NewContextWithEngine(harness, engine), engine, harness, tt.Query, tt.ExpectedPlan)
 		})
@@ -1233,6 +1270,51 @@ func TestPreparedScripts(t *testing.T, harness Harness) {
 	}
 }
 
+func TestScriptQueryPlan(t *testing.T, harness Harness) {
+	// TEST SCRIPTS
+	for _, script := range ScriptQueryPlanTest {
+		// TEST SCRIPT
+		func() bool {
+			return t.Run(script.Name, func(t *testing.T) {
+				myDb := harness.NewDatabase("mydb")
+				databases := []sql.Database{myDb}
+				e := NewEngineWithDbs(t, harness, databases)
+				defer e.Close()
+
+				// Run Setup script
+				for _, statement := range script.SetUpScript {
+					if sh, ok := harness.(SkippingHarness); ok {
+						if sh.SkipQueryTest(statement) {
+							t.Skip()
+						}
+					}
+					RunQuery(t, e, harness, statement)
+				}
+
+				// Get context
+				ctx := NewContextWithEngine(harness, e)
+
+				// Run queries
+				for _, assertion := range script.Assertions {
+					parsed, err := parse.Parse(ctx, assertion.Query)
+					require.NoError(t, err)
+
+					node, err := e.Analyzer.Analyze(ctx, parsed, nil)
+					require.NoError(t, err)
+
+					if sh, ok := harness.(SkippingHarness); ok {
+						if sh.SkipQueryTest(assertion.Query) {
+							t.Skipf("Skipping query plan for %s", assertion.Query)
+						}
+					}
+
+					assert.Equal(t, assertion.ExpectedErrStr, extractQueryNode(node).String(), "Unexpected result for query: "+assertion.Query)
+				}
+			})
+		}()
+	}
+}
+
 func TestUserPrivileges(t *testing.T, h Harness) {
 	harness, ok := h.(ClientHarness)
 	if !ok {
@@ -1293,6 +1375,95 @@ func TestUserPrivileges(t *testing.T, h Harness) {
 						TestQueryWithContext(t, ctx, engine, assertion.Query, assertion.Expected, nil, nil)
 					})
 				}
+			}
+		})
+	}
+
+	// These tests are functionally identical to UserPrivTests, hence their inclusion in the same testing function.
+	// They're just written a little differently to ease the developer's ability to produce as many as possible.
+	for _, script := range QuickPrivTests {
+		t.Run(strings.Join(script.Queries, "\n > "), func(t *testing.T) {
+			provider := harness.NewDatabaseProvider(
+				harness.NewDatabase("mydb"),
+				harness.NewDatabase("otherdb"),
+				information_schema.NewInformationSchemaDatabase(),
+			)
+			engine := sqle.New(analyzer.NewDefault(provider), new(sqle.Config))
+			defer engine.Close()
+
+			engine.Analyzer.Catalog.GrantTables.AddRootAccount()
+			rootCtx := harness.NewContextWithClient(sql.Client{
+				User:    "root",
+				Address: "localhost",
+			})
+			rootCtx.SetCurrentDatabase("mydb")
+			for _, setupQuery := range []string{
+				"CREATE USER tester@localhost;",
+				"CREATE TABLE mydb.test (pk BIGINT PRIMARY KEY, v1 BIGINT);",
+				"CREATE TABLE mydb.test2 (pk BIGINT PRIMARY KEY, v1 BIGINT);",
+				"CREATE TABLE otherdb.test (pk BIGINT PRIMARY KEY, v1 BIGINT);",
+				"CREATE TABLE otherdb.test2 (pk BIGINT PRIMARY KEY, v1 BIGINT);",
+				"INSERT INTO mydb.test VALUES (0, 0), (1, 1);",
+				"INSERT INTO mydb.test2 VALUES (0, 1), (1, 2);",
+				"INSERT INTO otherdb.test VALUES (1, 1), (2, 2);",
+				"INSERT INTO otherdb.test2 VALUES (1, 1), (2, 2);",
+			} {
+				RunQueryWithContext(t, engine, rootCtx, setupQuery)
+			}
+
+			for i := 0; i < len(script.Queries)-1; i++ {
+				if sh, ok := harness.(SkippingHarness); ok {
+					if sh.SkipQueryTest(script.Queries[i]) {
+						t.Skipf("Skipping query %s", script.Queries[i])
+					}
+				}
+				RunQueryWithContext(t, engine, rootCtx, script.Queries[i])
+			}
+			lastQuery := script.Queries[len(script.Queries)-1]
+			if sh, ok := harness.(SkippingHarness); ok {
+				if sh.SkipQueryTest(lastQuery) {
+					t.Skipf("Skipping query %s", lastQuery)
+				}
+			}
+			ctx := harness.NewContextWithClient(sql.Client{
+				User:    "tester",
+				Address: "localhost",
+			})
+			ctx.SetCurrentDatabase(rootCtx.GetCurrentDatabase())
+			if script.ExpectedErr != nil {
+				t.Run(lastQuery, func(t *testing.T) {
+					AssertErrWithCtx(t, engine, ctx, lastQuery, script.ExpectedErr)
+				})
+			} else if script.ExpectingErr {
+				t.Run(lastQuery, func(t *testing.T) {
+					sch, iter, err := engine.Query(ctx, lastQuery)
+					if err == nil {
+						_, err = sql.RowIterToRows(ctx, sch, iter)
+					}
+					require.Error(t, err)
+					for _, errKind := range []*errors.Kind{
+						sql.ErrPrivilegeCheckFailed,
+						sql.ErrDatabaseAccessDeniedForUser,
+						sql.ErrTableAccessDeniedForUser,
+					} {
+						if errKind.Is(err) {
+							return
+						}
+					}
+					t.Fatalf("Not a standard privilege-check error: %s", err.Error())
+				})
+			} else {
+				t.Run(lastQuery, func(t *testing.T) {
+					sch, iter, err := engine.Query(ctx, lastQuery)
+					require.NoError(t, err)
+					rows, err := sql.RowIterToRows(ctx, sch, iter)
+					require.NoError(t, err)
+					// See the comment on QuickPrivilegeTest for a more in-depth explanation, but essentially we treat
+					// nil in script.Expected as matching "any" non-error result.
+					if script.Expected != nil && (rows != nil || len(script.Expected) != 0) {
+						checkResults(t, require.New(t), script.Expected, nil, sch, rows, lastQuery)
+					}
+				})
 			}
 		})
 	}
@@ -1439,7 +1610,11 @@ func TestScriptWithEngine(t *testing.T, e *sqle.Engine, harness Harness, script 
 				AssertErr(t, e, harness, assertion.Query, nil, assertion.ExpectedErrStr)
 			})
 		} else if assertion.ExpectedWarning != 0 {
-			AssertWarningAndTestQuery(t, e, nil, harness, assertion.Query, assertion.Expected, nil, assertion.ExpectedWarning)
+			t.Run(assertion.Query, func(t *testing.T) {
+				AssertWarningAndTestQuery(t, e, nil, harness, assertion.Query,
+					assertion.Expected, nil, assertion.ExpectedWarning, assertion.ExpectedWarningsCount,
+					assertion.ExpectedWarningMessageSubstring, assertion.SkipResultsCheck)
+			})
 		} else {
 			TestQuery(t, harness, e, assertion.Query, assertion.Expected, nil, nil)
 		}
@@ -1490,7 +1665,11 @@ func TestScriptWithEnginePrepared(t *testing.T, e *sqle.Engine, harness Harness,
 				AssertErr(t, e, harness, assertion.Query, nil, assertion.ExpectedErrStr)
 			})
 		} else if assertion.ExpectedWarning != 0 {
-			AssertWarningAndTestQuery(t, e, nil, harness, assertion.Query, assertion.Expected, nil, assertion.ExpectedWarning)
+			t.Run(assertion.Query, func(t *testing.T) {
+				AssertWarningAndTestQuery(t, e, nil, harness, assertion.Query,
+					assertion.Expected, nil, assertion.ExpectedWarning, assertion.ExpectedWarningsCount,
+					assertion.ExpectedWarningMessageSubstring, assertion.SkipResultsCheck)
+			})
 		} else {
 			TestPreparedQueryWithContext(t, ctx, e, assertion.Query, assertion.Expected, nil, nil)
 			//TestQuery(t, harness, e, assertion.Query, assertion.Expected, nil, nil)
@@ -1539,7 +1718,9 @@ func TestTransactionScriptWithEngine(t *testing.T, e *sqle.Engine, harness Harne
 			} else if assertion.ExpectedErrStr != "" {
 				AssertErrWithCtx(t, e, clientSession, assertion.Query, nil, assertion.ExpectedErrStr)
 			} else if assertion.ExpectedWarning != 0 {
-				AssertWarningAndTestQuery(t, e, nil, harness, assertion.Query, assertion.Expected, nil, assertion.ExpectedWarning)
+				AssertWarningAndTestQuery(t, e, nil, harness, assertion.Query, assertion.Expected,
+					nil, assertion.ExpectedWarning, assertion.ExpectedWarningsCount,
+					assertion.ExpectedWarningMessageSubstring, false)
 			} else {
 				TestQueryWithContext(t, clientSession, e, assertion.Query, assertion.Expected, nil, nil)
 			}
@@ -2007,13 +2188,101 @@ func TestDropTable(t *testing.T, harness Harness) {
 	_, _, err = e.Query(NewContext(harness), "DROP TABLE not_exist")
 	require.Error(err)
 
+	_, _, err = e.Query(NewContext(harness), "DROP TABLE IF EXISTS not_exist")
+	require.NoError(err)
+
 	t.Run("no database selected", func(t *testing.T) {
 		ctx := NewContext(harness)
 		ctx.SetCurrentDatabase("")
 
-		t.Skip("Panics")
+		RunQuery(t, e, harness, "CREATE DATABASE otherdb")
+		otherdb, err := e.Analyzer.Catalog.Database(ctx, "otherdb")
 
-		TestQueryWithContext(t, ctx, e, "DROP TABLE IF EXISTS mydb.one_pk", []sql.Row(nil), nil, nil)
+		TestQueryWithContext(t, ctx, e, "DROP TABLE mydb.one_pk", []sql.Row(nil), nil, nil)
+
+		_, ok, err = db.GetTableInsensitive(ctx, "mydb.one_pk")
+		require.NoError(err)
+		require.False(ok)
+
+		RunQuery(t, e, harness, "CREATE TABLE otherdb.table1 (pk1 integer)")
+		RunQuery(t, e, harness, "CREATE TABLE otherdb.table2 (pk2 integer)")
+
+		_, _, err = e.Query(ctx, "DROP TABLE otherdb.table1, mydb.one_pk_two_idx")
+		require.Error(err)
+
+		_, ok, err = otherdb.GetTableInsensitive(ctx, "table1")
+		require.NoError(err)
+		require.True(ok)
+
+		_, ok, err = db.GetTableInsensitive(ctx, "one_pk_two_idx")
+		require.NoError(err)
+		require.True(ok)
+
+		_, _, err = e.Query(ctx, "DROP TABLE IF EXISTS otherdb.table1, mydb.one_pk")
+		require.Error(err)
+
+		_, ok, err = otherdb.GetTableInsensitive(ctx, "table1")
+		require.NoError(err)
+		require.True(ok)
+
+		_, ok, err = db.GetTableInsensitive(ctx, "one_pk_two_idx")
+		require.NoError(err)
+		require.True(ok)
+
+		_, _, err = e.Query(ctx, "DROP TABLE otherdb.table1, otherdb.table3")
+		require.Error(err)
+
+		_, ok, err = otherdb.GetTableInsensitive(ctx, "table1")
+		require.NoError(err)
+		require.True(ok)
+
+		_, _, err = e.Query(ctx, "DROP TABLE IF EXISTS otherdb.table1, otherdb.table3")
+		require.NoError(err)
+
+		_, ok, err = otherdb.GetTableInsensitive(ctx, "table1")
+		require.NoError(err)
+		require.False(ok)
+	})
+
+	t.Run("cur database selected, drop tables in other db", func(t *testing.T) {
+		ctx := NewContext(harness)
+		ctx.SetCurrentDatabase("mydb")
+
+		RunQuery(t, e, harness, "DROP DATABASE IF EXISTS otherdb")
+		RunQuery(t, e, harness, "CREATE DATABASE otherdb")
+		otherdb, err := e.Analyzer.Catalog.Database(ctx, "otherdb")
+
+		RunQuery(t, e, harness, "CREATE TABLE tab1 (pk1 integer, c1 text)")
+		RunQuery(t, e, harness, "CREATE TABLE otherdb.tab1 (other_pk1 integer)")
+		RunQuery(t, e, harness, "CREATE TABLE otherdb.tab2 (other_pk2 integer)")
+
+		_, _, err = e.Query(ctx, "DROP TABLE otherdb.tab1")
+		require.NoError(err)
+
+		_, ok, err = db.GetTableInsensitive(ctx, "tab1")
+		require.NoError(err)
+		require.True(ok)
+
+		_, ok, err = otherdb.GetTableInsensitive(ctx, "tab1")
+		require.NoError(err)
+		require.False(ok)
+
+		_, _, err = e.Query(ctx, "DROP TABLE nonExistentTable, otherdb.tab2")
+		require.Error(err)
+
+		_, _, err = e.Query(ctx, "DROP TABLE IF EXISTS nonExistentTable, otherdb.tab2")
+		require.Error(err)
+
+		_, ok, err = otherdb.GetTableInsensitive(ctx, "tab2")
+		require.NoError(err)
+		require.True(ok)
+
+		_, _, err = e.Query(ctx, "DROP TABLE IF EXISTS otherdb.tab3, otherdb.tab2")
+		require.NoError(err)
+
+		_, ok, err = otherdb.GetTableInsensitive(ctx, "tab2")
+		require.NoError(err)
+		require.False(ok)
 	})
 }
 
@@ -2151,6 +2420,24 @@ func TestRenameColumn(t *testing.T, harness Harness) {
 		require.Equal("test_check", checks[0].Name)
 		require.Equal("(i2 < 12345)", checks[0].CheckExpression)
 	})
+
+	t.Run("no database selected", func(t *testing.T) {
+		ctx := NewContext(harness)
+		ctx.SetCurrentDatabase("")
+
+		beforeDropTbl, _, _ := db.GetTableInsensitive(NewContext(harness), "tabletest")
+
+		TestQueryWithContext(t, ctx, e, "ALTER TABLE mydb.tabletest RENAME COLUMN s TO i1", []sql.Row(nil), nil, nil)
+
+		tbl, ok, err = db.GetTableInsensitive(NewContext(harness), "tabletest")
+		require.NoError(err)
+		require.True(ok)
+		assert.NotEqual(t, beforeDropTbl, tbl.Schema())
+		assert.Equal(t, sql.Schema{
+			{Name: "i", Type: sql.Int32, Source: "tabletest", PrimaryKey: true},
+			{Name: "i1", Type: sql.Text, Source: "tabletest"},
+		}, tbl.Schema())
+	})
 }
 
 func assertSchemasEqualWithDefaults(t *testing.T, expected, actual sql.Schema) bool {
@@ -2280,8 +2567,6 @@ func TestAddColumn(t *testing.T, harness Harness) {
 		ctx := NewContext(harness)
 		ctx.SetCurrentDatabase("")
 
-		t.Skip("broken")
-
 		TestQueryWithContext(t, ctx, e, "ALTER TABLE mydb.mytable ADD COLUMN s10 VARCHAR(26)", []sql.Row(nil), nil, nil)
 
 		tbl, ok, err = db.GetTableInsensitive(NewContext(harness), "mytable")
@@ -2297,7 +2582,6 @@ func TestAddColumn(t *testing.T, harness Harness) {
 			{Name: "s5", Type: sql.MustCreateStringWithDefaults(sqltypes.VarChar, 27), Source: "mytable", Nullable: true},
 			{Name: "s10", Type: sql.MustCreateStringWithDefaults(sqltypes.VarChar, 26), Source: "mytable", Nullable: true},
 		}, tbl.Schema())
-
 	})
 }
 
@@ -2384,7 +2668,16 @@ func TestModifyColumn(t *testing.T, harness Harness) {
 		ctx := NewContext(harness)
 		ctx.SetCurrentDatabase("")
 
-		TestQueryWithContext(t, ctx, e, "ALTER TABLE mydb.mytable MODIFY COLUMN s VARCHAR(21) NULL COMMENT 'changed'", []sql.Row(nil), nil, nil)
+		TestQueryWithContext(t, ctx, e, "ALTER TABLE mydb.mytable MODIFY COLUMN s VARCHAR(21) NULL COMMENT 'changed again'", []sql.Row(nil), nil, nil)
+
+		tbl, ok, err = db.GetTableInsensitive(NewContext(harness), "mytable")
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.Equal(t, sql.Schema{
+			{Name: "i", Type: sql.Int64, Source: "mytable", PrimaryKey: true, AutoIncrement: true, Extra: "auto_increment"},
+			{Name: "s", Type: sql.MustCreateStringWithDefaults(sqltypes.VarChar, 21), Nullable: true, Source: "mytable", Comment: "changed again"},
+			{Name: "i2", Type: sql.Int64, Source: "mytable", Nullable: true},
+		}, tbl.Schema())
 	})
 }
 
@@ -2418,9 +2711,17 @@ func TestDropColumn(t *testing.T, harness Harness) {
 		ctx := NewContext(harness)
 		ctx.SetCurrentDatabase("")
 
-		t.Skip("broken")
+		beforeDropTbl, _, _ := db.GetTableInsensitive(NewContext(harness), "tabletest")
 
 		TestQueryWithContext(t, ctx, e, "ALTER TABLE mydb.tabletest DROP COLUMN s", []sql.Row(nil), nil, nil)
+
+		tbl, ok, err = db.GetTableInsensitive(NewContext(harness), "tabletest")
+		require.NoError(err)
+		require.True(ok)
+		assert.NotEqual(t, beforeDropTbl, tbl.Schema())
+		assert.Equal(t, sql.Schema{
+			{Name: "i", Type: sql.Int32, Source: "tabletest", PrimaryKey: true},
+		}, tbl.Schema())
 	})
 
 	t.Run("drop column preserves table check constraints", func(t *testing.T) {
@@ -2516,14 +2817,24 @@ func TestCreateDatabase(t *testing.T, harness Harness) {
 	})
 
 	t.Run("CREATE DATABASE error handling", func(t *testing.T) {
+		AssertWarningAndTestQuery(t, e, ctx, harness, "CREATE DATABASE newtestdb CHARACTER SET utf8mb4 ENCRYPTION='N'",
+			[]sql.Row{sql.Row{sql.OkResult{RowsAffected: 1, InsertID: 0, Info: nil}}}, nil, mysql.ERNotSupportedYet, 1,
+			"", false)
+
+		AssertWarningAndTestQuery(t, e, ctx, harness, "CREATE DATABASE newtest1db DEFAULT COLLATE binary ENCRYPTION='Y'",
+			[]sql.Row{sql.Row{sql.OkResult{RowsAffected: 1, InsertID: 0, Info: nil}}}, nil, mysql.ERNotSupportedYet, 1,
+			"", false)
+
 		AssertErr(t, e, harness, "CREATE DATABASE mydb", sql.ErrDatabaseExists)
 
-		AssertWarningAndTestQuery(t, e, nil, harness, "CREATE DATABASE IF NOT EXISTS mydb", []sql.Row{{sql.OkResult{RowsAffected: 1}}}, nil, mysql.ERDbCreateExists)
+		AssertWarningAndTestQuery(t, e, nil, harness, "CREATE DATABASE IF NOT EXISTS mydb",
+			[]sql.Row{{sql.OkResult{RowsAffected: 1}}}, nil, mysql.ERDbCreateExists,
+			-1, "", false)
 	})
 }
 
-func TestPkOrdinals(t *testing.T, harness Harness) {
-	tests := []struct {
+func TestPkOrdinalsDDL(t *testing.T, harness Harness) {
+	ddl := []struct {
 		name        string
 		create      string
 		alter       string
@@ -2616,7 +2927,7 @@ func TestPkOrdinals(t *testing.T, harness Harness) {
 
 	var err error
 	var db sql.Database
-	for _, tt := range tests {
+	for _, tt := range ddl {
 		t.Run(tt.name, func(t *testing.T) {
 			defer RunQuery(t, e, harness, "DROP TABLE IF EXISTS a")
 			RunQuery(t, e, harness, tt.create)
@@ -2635,6 +2946,163 @@ func TestPkOrdinals(t *testing.T, harness Harness) {
 
 			pkOrds := pkTable.PrimaryKeySchema().PkOrdinals
 			require.Equal(t, tt.expOrdinals, pkOrds)
+		})
+	}
+}
+
+func TestPkOrdinalsDML(t *testing.T, harness Harness) {
+	dml := []struct {
+		create string
+		insert string
+		mutate string
+		sel    string
+		exp    []sql.Row
+	}{
+		{
+			create: "CREATE TABLE a (x int, y int, z int, w int, primary key (z,x))",
+			insert: "INSERT INTO a values (0,0,0,0), (1,1,1,1), (2,2,2,2)",
+			mutate: "DELETE FROM a WHERE x = 0",
+			sel:    "select * from a",
+			exp:    []sql.Row{{1, 1, 1, 1}, {2, 2, 2, 2}},
+		},
+		{
+			create: "CREATE TABLE a (x int, y int, z int, w int, primary key (z,x,w))",
+			insert: "INSERT INTO a values (0,0,0,0), (1,1,1,1), (2,2,2,2)",
+			mutate: "DELETE FROM a WHERE x = 0 and z = 0",
+			sel:    "select * from a",
+			exp:    []sql.Row{{1, 1, 1, 1}, {2, 2, 2, 2}},
+		},
+		{
+			create: "CREATE TABLE a (x int, y int, z int, w int, primary key (z,x))",
+			insert: "INSERT INTO a values (0,NULL,0,0), (1,NULL,1,1), (2,2,2,2)",
+			mutate: "DELETE FROM a WHERE y = 2",
+			sel:    "select * from a",
+			exp:    []sql.Row{{0, nil, 0, 0}, {1, nil, 1, 1}},
+		},
+		{
+			create: "CREATE TABLE a (x int, y int, z int, w int, primary key (z,x))",
+			insert: "INSERT INTO a values (0,NULL,0,0), (1,NULL,1,1), (2,2,2,2)",
+			mutate: "DELETE FROM a WHERE y in (2)",
+			sel:    "select * from a",
+			exp:    []sql.Row{{0, nil, 0, 0}, {1, nil, 1, 1}},
+		},
+		{
+			create: "CREATE TABLE a (x int, y int, z int, w int, primary key (z,x))",
+			insert: "INSERT INTO a values (0,NULL,0,0), (1,NULL,1,1), (2,2,2,2)",
+			mutate: "DELETE FROM a WHERE y not in (NULL)",
+			sel:    "select * from a",
+			exp:    []sql.Row{{0, nil, 0, 0}, {1, nil, 1, 1}, {2, 2, 2, 2}},
+		},
+		{
+			create: "CREATE TABLE a (x int, y int, z int, w int, primary key (z,x))",
+			insert: "INSERT INTO a values (0,NULL,0,0), (1,NULL,1,1), (2,2,2,2)",
+			mutate: "DELETE FROM a WHERE y IS NOT NULL",
+			sel:    "select * from a",
+			exp:    []sql.Row{{0, nil, 0, 0}, {1, nil, 1, 1}},
+		},
+		{
+			create: "CREATE TABLE a (x int, y int, z int, w int, primary key (z,x))",
+			insert: "INSERT INTO a values (0,NULL,0,0), (1,NULL,1,1), (2,2,2,2)",
+			mutate: "DELETE FROM a WHERE y IS NULL",
+			sel:    "select * from a",
+			exp:    []sql.Row{{2, 2, 2, 2}},
+		},
+		{
+			create: "CREATE TABLE a (x int, y int, z int, w int, primary key (z,x))",
+			insert: "INSERT INTO a values (0,NULL,0,0), (1,NULL,1,1), (2,2,2,2)",
+			mutate: "DELETE FROM a WHERE y = NULL",
+			sel:    "select * from a",
+			exp:    []sql.Row{{0, nil, 0, 0}, {1, nil, 1, 1}, {2, 2, 2, 2}},
+		},
+		{
+			create: "CREATE TABLE a (x int, y int, z int, w int, primary key (z,x))",
+			insert: "INSERT INTO a values (0,NULL,0,0), (1,NULL,1,1), (2,2,2,2)",
+			mutate: "DELETE FROM a WHERE y = NULL or y in (2,4)",
+			sel:    "select * from a",
+			exp:    []sql.Row{{0, nil, 0, 0}, {1, nil, 1, 1}},
+		},
+		{
+			create: "CREATE TABLE a (x int, y int, z int, w int, primary key (z,x))",
+			insert: "INSERT INTO a values (0,NULL,0,0), (1,NULL,1,1), (2,2,2,2)",
+			mutate: "DELETE FROM a WHERE y IS NULL or y in (2,4)",
+			sel:    "select * from a",
+			exp:    []sql.Row{},
+		},
+		{
+			create: "CREATE TABLE a (x int, y int, z int, w int, primary key (z,x))",
+			insert: "INSERT INTO a values (0,NULL,0,0), (1,NULL,1,1), (2,2,2,2)",
+			mutate: "DELETE FROM a WHERE y IS NULL AND z != 0",
+			sel:    "select * from a",
+			exp:    []sql.Row{{0, nil, 0, 0}, {2, 2, 2, 2}},
+		},
+		{
+			create: "CREATE TABLE a (x int, y int, z int, w int, primary key (z,x))",
+			insert: "INSERT INTO a values (0,NULL,0,0), (1,NULL,1,1), (2,2,2,2)",
+			mutate: "DELETE FROM a WHERE y != NULL",
+			sel:    "select * from a",
+			exp:    []sql.Row{{0, nil, 0, 0}, {1, nil, 1, 1}, {2, 2, 2, 2}},
+		},
+		{
+			create: "CREATE TABLE a (x int, y int, z int, w int, primary key (z,x,w))",
+			insert: "INSERT INTO a values (0,NULL,0,0), (1,NULL,1,1), (2,2,2,2)",
+			mutate: "DELETE FROM a WHERE x in (0,2) and z in (0,4)",
+			sel:    "select * from a",
+			exp:    []sql.Row{{1, nil, 1, 1}, {2, 2, 2, 2}},
+		},
+		{
+			create: "CREATE TABLE a (x int, y int, z int, w int, primary key (z,x))",
+			insert: "INSERT INTO a values (0,NULL,0,0), (1,NULL,1,1), (2,2,2,2)",
+			mutate: "DELETE FROM a WHERE y in (2,-1)",
+			sel:    "select * from a",
+			exp:    []sql.Row{{0, nil, 0, 0}, {1, nil, 1, 1}},
+		},
+		{
+			create: "CREATE TABLE a (x int, y int, z int, w int, primary key (z,x))",
+			insert: "INSERT INTO a values (0,NULL,0,0), (1,NULL,1,1), (2,2,2,2)",
+			mutate: "DELETE FROM a WHERE y < 3",
+			sel:    "select * from a",
+			exp:    []sql.Row{{0, nil, 0, 0}, {1, nil, 1, 1}},
+		},
+		{
+			create: "CREATE TABLE a (x int, y int, z int, w int, primary key (z,x))",
+			insert: "INSERT INTO a values (0,NULL,0,0), (1,NULL,1,1), (2,2,2,2)",
+			mutate: "DELETE FROM a WHERE y > 0 and z = 2",
+			sel:    "select * from a",
+			exp:    []sql.Row{{0, nil, 0, 0}, {1, nil, 1, 1}},
+		},
+		{
+			create: "CREATE TABLE a (x int, y int, z int, w int, primary key (z,x))",
+			insert: "INSERT INTO a values (0,NULL,0,0), (1,NULL,1,1), (2,2,2,2)",
+			mutate: "DELETE FROM a WHERE y = 2",
+			sel:    "select y from a",
+			exp:    []sql.Row{{nil}, {nil}},
+		},
+		{
+			create: "CREATE TABLE a (x int, y int, z int, w int, index idx1 (y))",
+			insert: "INSERT INTO a values (0,0,0,0), (1,1,1,1), (2,2,2,2)",
+			mutate: "",
+			sel:    "select * from a where y = 3",
+			exp:    []sql.Row{},
+		},
+	}
+
+	e := NewEngine(t, harness)
+	defer e.Close()
+	RunQuery(t, e, harness, "create table b (y char(6) primary key)")
+	RunQuery(t, e, harness, "insert into b values ('aaaaaa'),('bbbbbb'),('cccccc')")
+	for _, tt := range dml {
+		t.Run(fmt.Sprintf("%s", tt.mutate), func(t *testing.T) {
+			defer RunQuery(t, e, harness, "DROP TABLE IF EXISTS a")
+			if tt.create != "" {
+				RunQuery(t, e, harness, tt.create)
+			}
+			if tt.insert != "" {
+				RunQuery(t, e, harness, tt.insert)
+			}
+			if tt.mutate != "" {
+				RunQuery(t, e, harness, tt.mutate)
+			}
+			TestQuery(t, harness, e, tt.sel, tt.exp, nil, nil)
 		})
 	}
 }
@@ -2684,7 +3152,9 @@ func TestDropDatabase(t *testing.T, harness Harness) {
 		// The test setup sets a database name, which interferes with DROP DATABASE tests
 		ctx := NewContext(harness)
 		TestQueryWithContext(t, ctx, e, "DROP DATABASE mydb", []sql.Row{{sql.OkResult{RowsAffected: 1}}}, nil, nil)
-		AssertWarningAndTestQuery(t, e, ctx, harness, "DROP DATABASE IF EXISTS mydb", []sql.Row{{sql.OkResult{RowsAffected: 0}}}, nil, mysql.ERDbDropExists)
+		AssertWarningAndTestQuery(t, e, ctx, harness, "DROP DATABASE IF EXISTS mydb",
+			[]sql.Row{{sql.OkResult{RowsAffected: 0}}}, nil, mysql.ERDbDropExists,
+			-1, "", false)
 
 		TestQueryWithContext(t, ctx, e, "CREATE DATABASE testdb", []sql.Row{{sql.OkResult{RowsAffected: 1}}}, nil, nil)
 
@@ -2700,7 +3170,9 @@ func TestDropDatabase(t *testing.T, harness Harness) {
 		require.Error(t, err)
 		require.True(t, sql.ErrDatabaseNotFound.Is(err), "Expected error of type %s but got %s", sql.ErrDatabaseNotFound, err)
 
-		AssertWarningAndTestQuery(t, e, ctx, harness, "DROP DATABASE IF EXISTS testdb", []sql.Row{{sql.OkResult{RowsAffected: 0}}}, nil, mysql.ERDbDropExists)
+		AssertWarningAndTestQuery(t, e, ctx, harness, "DROP DATABASE IF EXISTS testdb",
+			[]sql.Row{{sql.OkResult{RowsAffected: 0}}}, nil, mysql.ERDbDropExists,
+			-1, "", false)
 	})
 }
 
@@ -3062,6 +3534,16 @@ func TestChecksOnInsert(t *testing.T, harness Harness) {
 
 	AssertErr(t, e, harness, "INSERT INTO t1 (a,b) select a - 2, b - 1 from t2", sql.ErrCheckConstraintViolated)
 	RunQuery(t, e, harness, "INSERT INTO t1 (a,b) select a, b from t2")
+
+	// Check that INSERT IGNORE correctly drops errors with check constraints and does not update the actual table.
+	RunQuery(t, e, harness, "INSERT IGNORE INTO t1 VALUES (5,2, 'abc')")
+	TestQuery(t, harness, e, `SELECT count(*) FROM t1 where a = 5`, []sql.Row{{0}}, nil, nil)
+
+	// One value is correctly accepted and the other value is not accepted due to a check constraint violation.
+	// The accepted value is correctly added to the table.
+	RunQuery(t, e, harness, "INSERT IGNORE INTO t1 VALUES (4,4, null), (5,2, 'abc')")
+	TestQuery(t, harness, e, `SELECT count(*) FROM t1 where a = 5`, []sql.Row{{0}}, nil, nil)
+	TestQuery(t, harness, e, `SELECT count(*) FROM t1 where a = 4`, []sql.Row{{1}}, nil, nil)
 }
 
 func TestChecksOnUpdate(t *testing.T, harness Harness) {
@@ -4090,6 +4572,9 @@ func TestNoDatabaseSelected(t *testing.T, harness Harness) {
 	AssertErrWithCtx(t, e, ctx, "create table a (b int primary key)", sql.ErrNoDatabaseSelected)
 	AssertErrWithCtx(t, e, ctx, "show tables", sql.ErrNoDatabaseSelected)
 	AssertErrWithCtx(t, e, ctx, "show triggers", sql.ErrNoDatabaseSelected)
+
+	_, _, err := e.Query(ctx, "ROLLBACK")
+	require.NoError(t, err)
 }
 
 func TestSessionSelectLimit(t *testing.T, harness Harness) {
@@ -4338,9 +4823,8 @@ func TestAddDropPks(t *testing.T, harness Harness) {
 		}, nil, nil)
 
 		// Assert that query plan this follows correctly uses an IndexedTableAccess
-		expectedPlan := "Filter(t1.v = \"a3\")\n" +
-			" └─ Projected table access on [pk v]\n" +
-			"     └─ IndexedTableAccess(t1 on [t1.v])\n" +
+		expectedPlan := "Projected table access on [pk v]\n" +
+			" └─ IndexedTableAccess(t1 on [t1.v])\n" +
 			""
 
 		TestQueryPlan(t, NewContextWithEngine(harness, e), e, harness, `SELECT * FROM t1 WHERE v = 'a3'`, expectedPlan)
@@ -4392,6 +4876,122 @@ func TestAddDropPks(t *testing.T, harness Harness) {
 			{"tab1", "CREATE TABLE `tab1` (\n  `pk` int NOT NULL,\n  `c1` int\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"},
 		}, nil, nil)
 	})
+}
+
+func TestNullRanges(t *testing.T, harness Harness) {
+	tests := []struct {
+		query string
+		exp   []sql.Row
+	}{
+		{
+			query: "select * from a where y IS NULL or y < 1",
+			exp: []sql.Row{
+				{0, 0},
+				{3, nil},
+				{4, nil},
+			},
+		},
+		{
+			query: "select * from a where y IS NULL and y < 1",
+			exp:   []sql.Row{},
+		},
+		{
+			query: "select * from a where y IS NULL or y IS NOT NULL",
+			exp: []sql.Row{
+				{0, 0},
+				{1, 1},
+				{2, 2},
+				{3, nil},
+				{4, nil},
+			},
+		},
+		{
+			query: "select * from a where y IS NOT NULL",
+			exp: []sql.Row{
+				{0, 0},
+				{1, 1},
+				{2, 2},
+			},
+		},
+		{
+			query: "select * from a where y IS NULL or y = 0 or y = 1",
+			exp: []sql.Row{
+				{0, 0},
+				{1, 1},
+				{3, nil},
+				{4, nil},
+			},
+		},
+		{
+			query: "select * from a where y IS NULL or y < 1 or y > 1",
+			exp: []sql.Row{
+				{0, 0},
+				{2, 2},
+				{3, nil},
+				{4, nil},
+			},
+		},
+		{
+			query: "select * from a where y IS NOT NULL and x > 1",
+			exp: []sql.Row{
+				{2, 2},
+			},
+		}, {
+			query: "select * from a where y IS NULL and x = 4",
+			exp: []sql.Row{
+				{4, nil},
+			},
+		}, {
+			query: "select * from a where y IS NULL and x > 1",
+			exp: []sql.Row{
+				{3, nil},
+				{4, nil},
+			},
+		},
+		{
+			query: "select * from a where y IS NULL and y IS NOT NULL",
+			exp:   []sql.Row{},
+		},
+		{
+			query: "select * from a where y is NULL and y > -1 and y > -2",
+			exp:   []sql.Row{},
+		},
+		{
+			query: "select * from a where y > -1 and y < 7 and y IS NULL",
+			exp:   []sql.Row{},
+		},
+		{
+			query: "select * from a where y > -1 and y > -2 and y IS NOT NULL",
+			exp: []sql.Row{
+				{0, 0},
+				{1, 1},
+				{2, 2},
+			},
+		},
+		{
+			query: "select * from a where y > -1 and y > 1 and y IS NOT NULL",
+			exp: []sql.Row{
+				{2, 2},
+			},
+		},
+		{
+			query: "select * from a where y < 6 and y > -1 and y IS NOT NULL",
+			exp: []sql.Row{
+				{0, 0},
+				{1, 1},
+				{2, 2},
+			},
+		},
+	}
+
+	db := harness.NewDatabase("mydb")
+	e := sqle.NewDefault(harness.NewDatabaseProvider(db))
+	RunQuery(t, e, harness, `CREATE TABLE a (x int primary key, y int)`)
+	RunQuery(t, e, harness, `CREATE INDEX idx1 ON a (y);`)
+	RunQuery(t, e, harness, `INSERT INTO a VALUES (0,0), (1,1), (2,2), (3,null), (4,null)`)
+	for _, tt := range tests {
+		TestQuery(t, harness, e, tt.query, tt.exp, nil, nil)
+	}
 }
 
 // RunQuery runs the query given and asserts that it doesn't result in an error.
@@ -4461,28 +5061,41 @@ func AssertWarningAndTestQuery(
 	expected []sql.Row,
 	expectedCols []*sql.Column,
 	expectedCode int,
+	expectedWarningsCount int,
+	expectedWarningMessageSubstring string,
+	skipResultsCheck bool,
 ) {
 	require := require.New(t)
 	if ctx == nil {
 		ctx = NewContext(harness)
 	}
+	ctx.ClearWarnings()
+
 	sch, iter, err := e.Query(ctx, query)
 	require.NoError(err, "Unexpected error for query %s", query)
 
 	rows, err := sql.RowIterToRows(ctx, sch, iter)
 	require.NoError(err, "Unexpected error for query %s", query)
 
-	condition := false
-	for _, warning := range ctx.Warnings() {
-		if warning.Code == expectedCode {
-			condition = true
-			break
+	if expectedWarningsCount > 0 {
+		assert.Equal(t, expectedWarningsCount, len(ctx.Warnings()))
+	}
+
+	if expectedCode > 0 {
+		for _, warning := range ctx.Warnings() {
+			assert.Equal(t, expectedCode, warning.Code, "Unexpected warning code")
 		}
 	}
 
-	assert.True(t, condition)
+	if len(expectedWarningMessageSubstring) > 0 {
+		for _, warning := range ctx.Warnings() {
+			assert.Contains(t, warning.Message, expectedWarningMessageSubstring, "Unexpected warning message")
+		}
+	}
 
-	checkResults(t, require, expected, expectedCols, sch, rows, query)
+	if !skipResultsCheck {
+		checkResults(t, require, expected, expectedCols, sch, rows, query)
+	}
 }
 
 type customFunc struct {
@@ -4580,6 +5193,16 @@ func TestAlterTable(t *testing.T, harness Harness) {
 				Enforced:        true,
 			},
 		}, checks)
+	})
+
+	t.Run("Add column invalid after", func(t *testing.T) {
+		ctx := NewContext(harness)
+		AssertWarningAndTestQuery(t, e, ctx, harness, "ALTER TABLE t33 DISABLE KEYS",
+			[]sql.Row{}, nil, mysql.ERNotSupportedYet, 1,
+			"", false)
+		AssertWarningAndTestQuery(t, e, ctx, harness, "ALTER TABLE t33 ENABLE KEYS",
+			[]sql.Row{}, nil, mysql.ERNotSupportedYet, 1,
+			"", false)
 	})
 }
 
@@ -5313,6 +5936,12 @@ func NewEngineWithDbs(t *testing.T, harness Harness, databases []sql.Database) *
 	databases = append(databases, information_schema.NewInformationSchemaDatabase())
 	provider := harness.NewDatabaseProvider(databases...)
 
+	return NewEngineWithProvider(t, harness, provider)
+}
+
+// NewEngineWithProvider returns a new engine with the specified provider. This is useful when you don't want to
+// implement a full harness, but you need more control over the database provider than the default test MemoryProvider.
+func NewEngineWithProvider(_ *testing.T, harness Harness, provider sql.MutableDatabaseProvider) *sqle.Engine {
 	var a *analyzer.Analyzer
 	if harness.Parallelism() > 1 {
 		a = analyzer.NewBuilder(provider).WithParallelism(harness.Parallelism()).Build()
@@ -5700,4 +6329,118 @@ func widenJSONArray(narrow []interface{}) (wide []interface{}) {
 		wide[i] = widenJSON(v)
 	}
 	return
+}
+
+func TestPrivilegePersistence(t *testing.T, h Harness) {
+	harness, ok := h.(ClientHarness)
+	if !ok {
+		t.Skip("Cannot run TestPrivilegePersistence as the harness must implement ClientHarness")
+	}
+
+	ctx := NewContextWithClient(harness, sql.Client{
+		User:    "root",
+		Address: "localhost",
+	})
+
+	myDb := harness.NewDatabase("mydb")
+	databases := []sql.Database{myDb}
+	engine := NewEngineWithDbs(t, harness, databases)
+	defer engine.Close()
+	engine.Analyzer.Catalog.GrantTables.AddRootAccount()
+
+	var users []*grant_tables.User
+	var roles []*grant_tables.RoleEdge
+	engine.Analyzer.Catalog.GrantTables.SetPersistCallback(
+		func(ctx *sql.Context, updatedUsers []*grant_tables.User, updatedRoles []*grant_tables.RoleEdge) error {
+			users = updatedUsers
+			roles = updatedRoles
+			return nil
+		},
+	)
+
+	RunQueryWithContext(t, engine, ctx, "CREATE USER tester@localhost")
+	// If the user exists in []*grant_tables.User, then it must be NOT nil.
+	require.NotNil(t, findUser("tester", "localhost", users))
+
+	RunQueryWithContext(t, engine, ctx, "INSERT INTO mysql.user (Host, User) VALUES ('localhost', 'tester1')")
+	require.Nil(t, findUser("tester1", "localhost", users))
+
+	RunQueryWithContext(t, engine, ctx, "UPDATE mysql.user SET User = 'test_user' WHERE User = 'tester'")
+	require.NotNil(t, findUser("tester", "localhost", users))
+
+	RunQueryWithContext(t, engine, ctx, "FLUSH PRIVILEGES")
+	require.NotNil(t, findUser("tester1", "localhost", users))
+	require.Nil(t, findUser("tester", "localhost", users))
+	require.NotNil(t, findUser("test_user", "localhost", users))
+
+	RunQueryWithContext(t, engine, ctx, "DELETE FROM mysql.user WHERE User = 'tester1'")
+	require.NotNil(t, findUser("tester1", "localhost", users))
+
+	RunQueryWithContext(t, engine, ctx, "GRANT SELECT ON mydb.* TO test_user@localhost")
+	user := findUser("test_user", "localhost", users)
+	require.True(t, user.PrivilegeSet.Database("mydb").Has(sql.PrivilegeType_Select))
+
+	RunQueryWithContext(t, engine, ctx, "UPDATE mysql.db SET Insert_priv = 'Y' WHERE User = 'test_user'")
+	require.False(t, user.PrivilegeSet.Database("mydb").Has(sql.PrivilegeType_Insert))
+
+	RunQueryWithContext(t, engine, ctx, "CREATE USER dolt@localhost")
+	RunQueryWithContext(t, engine, ctx, "INSERT INTO mysql.db (Host, Db, User, Select_priv) VALUES ('localhost', 'mydb', 'dolt', 'Y')")
+	user1 := findUser("dolt", "localhost", users)
+	require.NotNil(t, user1)
+	require.False(t, user1.PrivilegeSet.Database("mydb").Has(sql.PrivilegeType_Select))
+
+	RunQueryWithContext(t, engine, ctx, "FLUSH PRIVILEGES")
+	require.Nil(t, findUser("tester1", "localhost", users))
+	user = findUser("test_user", "localhost", users)
+	require.True(t, user.PrivilegeSet.Database("mydb").Has(sql.PrivilegeType_Insert))
+	user1 = findUser("dolt", "localhost", users)
+	require.True(t, user1.PrivilegeSet.Database("mydb").Has(sql.PrivilegeType_Select))
+
+	RunQueryWithContext(t, engine, ctx, "CREATE ROLE test_role")
+	RunQueryWithContext(t, engine, ctx, "GRANT SELECT ON *.* TO test_role")
+	require.Zero(t, len(roles))
+	RunQueryWithContext(t, engine, ctx, "GRANT test_role TO test_user@localhost")
+	require.NotZero(t, len(roles))
+
+	RunQueryWithContext(t, engine, ctx, "UPDATE mysql.role_edges SET to_user = 'tester2' WHERE to_user = 'test_user'")
+	require.NotNil(t, findRole("test_user", roles))
+	require.Nil(t, findRole("tester2", roles))
+
+	RunQueryWithContext(t, engine, ctx, "FLUSH PRIVILEGES")
+	require.Nil(t, findRole("test_user", roles))
+	require.NotNil(t, findRole("tester2", roles))
+
+	RunQueryWithContext(t, engine, ctx, "INSERT INTO mysql.role_edges VALUES ('%', 'test_role', 'localhost', 'test_user', 'N')")
+	require.Nil(t, findRole("test_user", roles))
+
+	RunQueryWithContext(t, engine, ctx, "FLUSH PRIVILEGES")
+	require.NotNil(t, findRole("test_user", roles))
+
+	_, _, err := engine.Query(ctx, "FLUSH NO_WRITE_TO_BINLOG PRIVILEGES")
+	require.Error(t, err)
+
+	_, _, err = engine.Query(ctx, "FLUSH LOCAL PRIVILEGES")
+	require.Error(t, err)
+}
+
+// findUser returns *grant_table.User corresponding to specific user and host names.
+// If not found, returns nil *grant_table.User.
+func findUser(user string, host string, users []*grant_tables.User) *grant_tables.User {
+	for _, u := range users {
+		if u.User == user && u.Host == host {
+			return u
+		}
+	}
+	return nil
+}
+
+// findRole returns *grant_table.RoleEdge corresponding to specific to_user.
+// If not found, returns nil *grant_table.RoleEdge.
+func findRole(toUser string, roles []*grant_tables.RoleEdge) *grant_tables.RoleEdge {
+	for _, r := range roles {
+		if r.ToUser == toUser {
+			return r
+		}
+	}
+	return nil
 }

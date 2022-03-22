@@ -52,15 +52,32 @@ func resolveTables(ctx *sql.Context, a *Analyzer, n sql.Node, scope *Scope, sel 
 	span, _ := ctx.Span("resolve_tables")
 	defer span.Finish()
 
-	return plan.TransformUp(n, func(n sql.Node) (sql.Node, error) {
-		if n.Resolved() {
-			return n, nil
+	return plan.TransformUpCtx(n, nil, func(c plan.TransformContext) (sql.Node, error) {
+		ignore := false
+		switch p := c.Parent.(type) {
+		case *plan.DropTable:
+			ignore = p.IfExists()
 		}
-		t, ok := n.(*plan.UnresolvedTable)
-		if !ok {
+
+		switch p := c.Node.(type) {
+		case *plan.DropTable:
+			var resolvedTables []sql.Node
+			for _, t := range p.Children() {
+				if _, ok := t.(*plan.ResolvedTable); ok {
+					resolvedTables = append(resolvedTables, t)
+				}
+			}
+			c.Node, _ = p.WithChildren(resolvedTables...)
 			return n, nil
+		case *plan.UnresolvedTable:
+			r, err := resolveTable(ctx, p, a)
+			if sql.ErrTableNotFound.Is(err) && ignore {
+				return p, nil
+			}
+			return r, err
+		default:
+			return p, nil
 		}
-		return resolveTable(ctx, t, a)
 	})
 }
 
@@ -135,7 +152,23 @@ func setTargetSchemas(ctx *sql.Context, a *Analyzer, n sql.Node, scope *Scope, s
 			return n, nil
 		}
 
-		return t.WithTargetSchema(table.Schema())
+		var err error
+		n, err = t.WithTargetSchema(table.Schema())
+		if err != nil {
+			return nil, err
+		}
+
+		pkst, ok := n.(sql.PrimaryKeySchemaTarget)
+		if !ok {
+			return n, nil
+		}
+
+		pkt, ok := table.Table.(sql.PrimaryKeyTable)
+		if !ok {
+			return n, nil
+		}
+
+		return pkst.WithPrimaryKeySchema(pkt.PrimaryKeySchema())
 	})
 }
 
@@ -233,4 +266,27 @@ func transferProjections(from, to *plan.ResolvedTable) sql.Node {
 
 	newTable := pt.WithProjection(projections)
 	return plan.NewResolvedTable(newTable, to.Database, to.AsOf)
+}
+
+// validateDropTables returns an error if the database is not droppable.
+func validateDropTables(ctx *sql.Context, a *Analyzer, n sql.Node, scope *Scope, selector RuleSelector) (sql.Node, error) {
+	dt, ok := n.(*plan.DropTable)
+	if !ok {
+		return n, nil
+	}
+
+	// validates that each table in DropTable is ResolvedTable and each database of
+	// each table is TableDropper (each table can be of different database later on)
+	for _, table := range dt.Tables {
+		rt, ok := table.(*plan.ResolvedTable)
+		if !ok {
+			return nil, plan.ErrUnresolvedTable.New(rt.String())
+		}
+		_, ok = rt.Database.(sql.TableDropper)
+		if !ok {
+			return nil, sql.ErrDropTableNotSupported.New(rt.Database.Name())
+		}
+	}
+
+	return n, nil
 }

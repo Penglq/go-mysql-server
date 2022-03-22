@@ -23,8 +23,8 @@ import (
 var OnceBeforeDefault = []Rule{
 	{"validate_offset_and_limit", validateLimitAndOffset},
 	{"validate_create_table", validateCreateTable},
-	{"load_stored_procedures", loadStoredProcedures},
 	{"resolve_variables", resolveVariables},
+	{"resolve_named_windows", replaceNamedWindows},
 	{"resolve_set_variables", resolveSetVariables},
 	{"resolve_views", resolveViews},
 	{"lift_common_table_expressions", hoistCommonTableExpressions},
@@ -32,6 +32,8 @@ var OnceBeforeDefault = []Rule{
 	{"lift_recursive_ctes", hoistRecursiveCte},
 	{"resolve_databases", resolveDatabases},
 	{"resolve_tables", resolveTables},
+	{"load_stored_procedures", loadStoredProcedures}, // Ensure that loading procedures happens after table resolution
+	{"validate_drop_tables", validateDropTables},
 	{"set_target_schemas", setTargetSchemas},
 	{"resolve_create_like", resolveCreateLike},
 	{"parse_column_defaults", parseColumnDefaults},
@@ -43,6 +45,7 @@ var OnceBeforeDefault = []Rule{
 	{"resolve_unions", resolveUnions},
 	{"resolve_describe_query", resolveDescribeQuery},
 	{"check_unique_table_names", validateUniqueTableNames},
+	{"resolve_table_functions", resolveTableFunctions},
 	{"resolve_declarations", resolveDeclarations},
 	{"validate_create_trigger", validateCreateTrigger},
 	{"validate_create_procedure", validateCreateProcedure},
@@ -50,7 +53,7 @@ var OnceBeforeDefault = []Rule{
 	{"validate_read_only_database", validateReadOnlyDatabase},
 	{"validate_read_only_transaction", validateReadOnlyTransaction},
 	{"validate_database_set", validateDatabaseSet},
-	{"check_privileges", validatePrivileges}, // Ensure that checking privileges happens after db & table resolution
+	{"check_privileges", validatePrivileges}, // Ensure that checking privileges happens after db, table  & table function resolution
 	{"strip_decorations", stripDecorations},
 	{"unresolve_tables", unresolveTables},
 }
@@ -111,6 +114,7 @@ var OnceAfterDefault = []Rule{
 	{"resolve_insert_rows", resolveInsertRows},
 	{"apply_triggers", applyTriggers},
 	{"apply_procedures", applyProcedures},
+	{"assign_routines", assignRoutines},
 	{"modify_update_expressions_for_join", modifyUpdateExpressionsForJoin},
 	{"apply_row_update_accumulators", applyUpdateAccumulators},
 }

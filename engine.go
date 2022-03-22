@@ -18,12 +18,12 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/dolthub/go-mysql-server/sql/grant_tables"
-
 	"github.com/dolthub/go-mysql-server/memory"
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/dolthub/go-mysql-server/sql/analyzer"
+	"github.com/dolthub/go-mysql-server/sql/expression"
 	"github.com/dolthub/go-mysql-server/sql/expression/function"
+	"github.com/dolthub/go-mysql-server/sql/grant_tables"
 	"github.com/dolthub/go-mysql-server/sql/parse"
 	"github.com/dolthub/go-mysql-server/sql/plan"
 )
@@ -165,6 +165,7 @@ func (e *Engine) QueryNodeWithBindings(
 	var (
 		analyzed sql.Node
 		iter     sql.RowIter
+		iter2    sql.RowIter2
 		err      error
 	)
 
@@ -182,7 +183,17 @@ func (e *Engine) QueryNodeWithBindings(
 		return nil, nil, err
 	}
 
-	iter, err = analyzed.RowIter(ctx, nil)
+	useIter2 := false
+	if enableRowIter2 {
+		useIter2 = allNode2(analyzed)
+	}
+
+	if useIter2 {
+		iter2, err = analyzed.(sql.Node2).RowIter2(ctx, nil)
+		iter = iter2
+	} else {
+		iter, err = analyzed.RowIter(ctx, nil)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
@@ -193,13 +204,18 @@ func (e *Engine) QueryNodeWithBindings(
 	}
 
 	if autoCommit {
-		iter = transactionCommittingIter{iter, transactionDatabase}
+		iter = transactionCommittingIter{
+			childIter:           iter,
+			childIter2:          iter2,
+			transactionDatabase: transactionDatabase,
+		}
 	}
 
 	if enableRowIter2 {
 		iter = rowFormatSelectorIter{
-			RowIter: iter,
-			isNode2: allNode2(analyzed),
+			iter:    iter,
+			iter2:   iter2,
+			isNode2: useIter2,
 		}
 	}
 
@@ -310,7 +326,11 @@ func allNode2(n sql.Node) bool {
 	plan.Inspect(n, func(n sql.Node) bool {
 		switch n := n.(type) {
 		case *plan.ResolvedTable:
-			if _, ok := n.Table.(sql.Table2); !ok {
+			table := n.Table
+			if tw, ok := table.(sql.TableWrapper); ok {
+				table = tw.Underlying()
+			}
+			if _, ok := table.(sql.Table2); !ok {
 				allNode2 = false
 				return false
 			}
@@ -348,7 +368,8 @@ func allNode2(n sql.Node) bool {
 // rowFormatSelectorIter is a wrapping row iter that implements RowIterTypeSelector so that clients consuming rows from it
 // know whether it's safe to iterate as RowIter or RowIter2.
 type rowFormatSelectorIter struct {
-	sql.RowIter
+	iter    sql.RowIter
+	iter2   sql.RowIter2
 	isNode2 bool
 }
 
@@ -356,8 +377,19 @@ var _ sql.RowIterTypeSelector = rowFormatSelectorIter{}
 var _ sql.RowIter = rowFormatSelectorIter{}
 var _ sql.RowIter2 = rowFormatSelectorIter{}
 
+func (t rowFormatSelectorIter) Next(context *sql.Context) (sql.Row, error) {
+	return t.iter.Next(context)
+}
+
+func (t rowFormatSelectorIter) Close(context *sql.Context) error {
+	if t.iter2 != nil {
+		return t.iter2.Close(context)
+	}
+	return t.iter.Close(context)
+}
+
 func (t rowFormatSelectorIter) Next2(ctx *sql.Context, frame *sql.RowFrame) error {
-	return t.RowIter.(sql.RowIter2).Next2(ctx, frame)
+	return t.iter2.Next2(ctx, frame)
 }
 
 func (t rowFormatSelectorIter) IsNode2() bool {
@@ -455,6 +487,7 @@ func readCommitted(ctx *sql.Context) bool {
 // during the Close() operation
 type transactionCommittingIter struct {
 	childIter           sql.RowIter
+	childIter2          sql.RowIter2
 	transactionDatabase string
 }
 
@@ -463,7 +496,7 @@ func (t transactionCommittingIter) Next(ctx *sql.Context) (sql.Row, error) {
 }
 
 func (t transactionCommittingIter) Next2(ctx *sql.Context, frame *sql.RowFrame) error {
-	return t.childIter.(sql.RowIter2).Next2(ctx, frame)
+	return t.childIter2.Next2(ctx, frame)
 }
 
 func (t transactionCommittingIter) Close(ctx *sql.Context) error {
@@ -507,8 +540,67 @@ func getTransactionDatabase(ctx *sql.Context, parsed sql.Node) string {
 	switch n := parsed.(type) {
 	case *plan.Use:
 		transactionDatabase = n.Database().Name()
+	case *plan.DropTable:
+		t, ok := n.Tables[0].(*plan.UnresolvedTable)
+		if ok && t.Database() != "" {
+			transactionDatabase = t.Database()
+		}
 	case *plan.AlterPK:
 		t, ok := n.Table.(*plan.UnresolvedTable)
+		if ok && t.Database() != "" {
+			transactionDatabase = t.Database()
+		}
+	case *plan.AlterAutoIncrement:
+		t, ok := n.Child.(*plan.UnresolvedTable)
+		if ok && t.Database() != "" {
+			transactionDatabase = t.Database()
+		}
+	case *plan.CreateIndex:
+		t, ok := n.Table.(*plan.UnresolvedTable)
+		if ok && t.Database() != "" {
+			transactionDatabase = t.Database()
+		}
+	case *plan.AlterIndex:
+		t, ok := n.Table.(*plan.UnresolvedTable)
+		if ok && t.Database() != "" {
+			transactionDatabase = t.Database()
+		}
+	case *plan.DropIndex:
+		t, ok := n.Table.(*plan.UnresolvedTable)
+		if ok && t.Database() != "" {
+			transactionDatabase = t.Database()
+		}
+	case *plan.CreateForeignKey:
+		if n.Database().Name() != "" {
+			transactionDatabase = n.Database().Name()
+		}
+	case *plan.DropForeignKey:
+		t, ok := n.Child.(*plan.UnresolvedTable)
+		if ok && t.Database() != "" {
+			transactionDatabase = t.Database()
+		}
+	case *plan.AddColumn:
+		t, ok := n.Child.(*plan.UnresolvedTable)
+		if ok && t.Database() != "" {
+			transactionDatabase = t.Database()
+		}
+	case *plan.DropColumn:
+		t, ok := n.Child.(*plan.UnresolvedTable)
+		if ok && t.Database() != "" {
+			transactionDatabase = t.Database()
+		}
+	case *plan.RenameColumn:
+		t, ok := n.Child.(*plan.UnresolvedTable)
+		if ok && t.Database() != "" {
+			transactionDatabase = t.Database()
+		}
+	case *plan.ModifyColumn:
+		t, ok := n.Child.(*plan.UnresolvedTable)
+		if ok && t.Database() != "" {
+			transactionDatabase = t.Database()
+		}
+	case *plan.Truncate:
+		t, ok := n.Child.(*plan.UnresolvedTable)
 		if ok && t.Database() != "" {
 			transactionDatabase = t.Database()
 		}
@@ -597,4 +689,23 @@ func ResolveDefaults(tableName string, schema []*ColumnWithRawDefault) (sql.Sche
 	}
 
 	return analyzedCreateTable.CreateSchema.Schema, nil
+}
+
+// ColumnsFromCheckDefinition retrieves the Column Names referenced by a CheckDefinition
+func ColumnsFromCheckDefinition(ctx *sql.Context, def *sql.CheckDefinition) ([]string, error) {
+	// Evaluate the CheckDefinition to get evaluated Expression
+	c, err := analyzer.ConvertCheckDefToConstraint(ctx, def)
+	if err != nil {
+		return nil, err
+	}
+	// Look for any column references in the evaluated Expression
+	var cols []string
+	sql.Inspect(c.Expr, func(expr sql.Expression) bool {
+		if c, ok := expr.(*expression.UnresolvedColumn); ok {
+			cols = append(cols, c.Name())
+			return false
+		}
+		return true
+	})
+	return cols, nil
 }

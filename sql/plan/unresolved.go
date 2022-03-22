@@ -86,6 +86,12 @@ func (t *UnresolvedTable) AsOf() sql.Expression {
 	return t.asOf
 }
 
+// CheckPrivileges implements the interface sql.Node.
+func (t *UnresolvedTable) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
+	return opChecker.UserHasPrivileges(ctx,
+		sql.NewPrivilegedOperation(t.Database(), t.name, "", sql.PrivilegeType_Select))
+}
+
 // WithAsOf implements sql.VersionedTable
 func (t *UnresolvedTable) WithAsOf(asOf sql.Expression) (sql.Node, error) {
 	t2 := *t

@@ -57,6 +57,17 @@ func GetRangeCutKey(c RangeCut) interface{} {
 	}
 }
 
+func RangeCutIsBinding(c RangeCut) bool {
+	switch c.(type) {
+	case Below, Above:
+		return true
+	case AboveAll, BelowAll, NullBound:
+		return false
+	default:
+		panic(fmt.Errorf("unknown range cut %v", c))
+	}
+}
+
 // GetRangeCutMax returns the RangeCut with the highest value.
 func GetRangeCutMax(typ Type, cuts ...RangeCut) (RangeCut, error) {
 	i := 0
@@ -134,6 +145,8 @@ func (a Above) Compare(c RangeCut, typ Type) (int, error) {
 			return -1, nil
 		}
 		return 1, nil
+	case NullBound:
+		return -1, nil
 	default:
 		panic(fmt.Errorf("unrecognized RangeCut type '%T'", c))
 	}
@@ -163,6 +176,9 @@ var _ RangeCut = AboveAll{}
 func (AboveAll) Compare(c RangeCut, typ Type) (int, error) {
 	if _, ok := c.(AboveAll); ok {
 		return 0, nil
+	}
+	if _, ok := c.(NullBound); ok {
+		return -1, nil
 	}
 	return 1, nil
 }
@@ -206,6 +222,8 @@ func (b Below) Compare(c RangeCut, typ Type) (int, error) {
 		if cmp == -1 {
 			return 1, nil
 		}
+		return -1, nil
+	case NullBound:
 		return -1, nil
 	default:
 		panic(fmt.Errorf("unrecognized RangeCut type '%T'", c))
@@ -253,4 +271,33 @@ func (BelowAll) TypeAsLowerBound() RangeBoundType {
 // TypeAsUpperBound implements RangeCut.
 func (BelowAll) TypeAsUpperBound() RangeBoundType {
 	return Open
+}
+
+// NullBound represents the set of null fields
+type NullBound struct{}
+
+var _ RangeCut = NullBound{}
+
+// Compare implements RangeCut.
+func (NullBound) Compare(c RangeCut, typ Type) (int, error) {
+	// null only overlaps with itself
+	if _, ok := c.(NullBound); ok {
+		return 0, nil
+	}
+	return 1, nil
+}
+
+// String implements RangeCut.
+func (NullBound) String() string {
+	return "NullBound"
+}
+
+// TypeAsLowerBound implements RangeCut.
+func (NullBound) TypeAsLowerBound() RangeBoundType {
+	return Closed
+}
+
+// TypeAsUpperBound implements RangeCut.
+func (NullBound) TypeAsUpperBound() RangeBoundType {
+	return Closed
 }

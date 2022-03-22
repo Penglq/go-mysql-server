@@ -50,6 +50,11 @@ func (p *QueryProcess) WithChildren(children ...sql.Node) (sql.Node, error) {
 	return NewQueryProcess(children[0], p.Notify), nil
 }
 
+// CheckPrivileges implements the interface sql.Node.
+func (p *QueryProcess) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
+	return p.Child.CheckPrivileges(ctx, opChecker)
+}
+
 // RowIter implements the sql.Node interface.
 func (p *QueryProcess) RowIter(ctx *sql.Context, row sql.Row) (sql.RowIter, error) {
 	iter, err := p.Child.RowIter(ctx, row)
@@ -59,13 +64,11 @@ func (p *QueryProcess) RowIter(ctx *sql.Context, row sql.Row) (sql.RowIter, erro
 
 	qType := getQueryType(p.Child)
 
-	return &trackedRowIter{
-		node:               p.Child,
-		iter:               iter,
-		onDone:             p.Notify,
-		queryType:          qType,
-		shouldSetFoundRows: qType == queryTypeSelect && p.shouldSetFoundRows(),
-	}, nil
+	trackedIter := newTrackedRowIter(p.Child, iter, nil, p.Notify)
+	trackedIter.queryType = qType
+	trackedIter.shouldSetFoundRows = qType == queryTypeSelect && p.shouldSetFoundRows()
+
+	return trackedIter, nil
 }
 
 func (p *QueryProcess) RowIter2(ctx *sql.Context, f *sql.RowFrame) (sql.RowIter2, error) {
@@ -76,13 +79,11 @@ func (p *QueryProcess) RowIter2(ctx *sql.Context, f *sql.RowFrame) (sql.RowIter2
 
 	qType := getQueryType(p.Child)
 
-	return &trackedRowIter{
-		node:               p.Child,
-		iter:               iter,
-		onDone:             p.Notify,
-		queryType:          qType,
-		shouldSetFoundRows: qType == queryTypeSelect && p.shouldSetFoundRows(),
-	}, nil
+	trackedIter := newTrackedRowIter(p.Child, iter, nil, p.Notify)
+	trackedIter.queryType = qType
+	trackedIter.shouldSetFoundRows = qType == queryTypeSelect && p.shouldSetFoundRows()
+
+	return trackedIter, nil
 }
 
 func getQueryType(child sql.Node) queryType {
@@ -161,6 +162,8 @@ type ProcessIndexableTable struct {
 	OnRowNext        NamedNotifyFunc
 }
 
+var _ sql.Table2 = (*ProcessIndexableTable)(nil)
+
 func (t *ProcessIndexableTable) DebugString() string {
 	tp := sql.NewTreePrinter()
 	_ = tp.WriteNode("ProcessIndexableTable")
@@ -221,7 +224,7 @@ func (t *ProcessIndexableTable) newPartIter(p sql.Partition, iter sql.RowIter) (
 		}
 	}
 
-	return &trackedRowIter{iter: iter, onNext: onNext, onDone: onDone}, nil
+	return newTrackedRowIter(nil, iter, onNext, onDone), nil
 }
 
 func (t *ProcessIndexableTable) PartitionRows2(ctx *sql.Context, part sql.Partition) (sql.RowIter2, error) {
@@ -253,6 +256,8 @@ type ProcessTable struct {
 	OnRowNext        NamedNotifyFunc
 }
 
+var _ sql.Table2 = (*ProcessTable)(nil)
+
 // NewProcessTable returns a new ProcessTable.
 func NewProcessTable(t sql.Table, onPartitionDone, onPartitionStart, OnRowNext NamedNotifyFunc) *ProcessTable {
 	return &ProcessTable{t, onPartitionDone, onPartitionStart, OnRowNext}
@@ -270,6 +275,24 @@ func (t *ProcessTable) PartitionRows(ctx *sql.Context, p sql.Partition) (sql.Row
 		return nil, err
 	}
 
+	onDone, onNext := t.notifyFuncsForPartition(p)
+
+	return newTrackedRowIter(nil, iter, onNext, onDone), nil
+}
+
+func (t *ProcessTable) PartitionRows2(ctx *sql.Context, p sql.Partition) (sql.RowIter2, error) {
+	iter, err := t.Table.(sql.Table2).PartitionRows2(ctx, p)
+	if err != nil {
+		return nil, err
+	}
+
+	onDone, onNext := t.notifyFuncsForPartition(p)
+
+	return newTrackedRowIter(nil, iter, onNext, onDone), nil
+}
+
+// notifyFuncsForPartition returns the OnDone and OnNext NotifyFuncs for the partition given
+func (t *ProcessTable) notifyFuncsForPartition(p sql.Partition) (NotifyFunc, NotifyFunc) {
 	partitionName := partitionName(p)
 	if t.OnPartitionStart != nil {
 		t.OnPartitionStart(partitionName)
@@ -288,8 +311,7 @@ func (t *ProcessTable) PartitionRows(ctx *sql.Context, p sql.Partition) (sql.Row
 			t.OnRowNext(partitionName)
 		}
 	}
-
-	return &trackedRowIter{iter: iter, onNext: onNext, onDone: onDone}, nil
+	return onDone, onNext
 }
 
 type queryType byte
@@ -303,11 +325,22 @@ const (
 type trackedRowIter struct {
 	node               sql.Node
 	iter               sql.RowIter
+	iter2              sql.RowIter2
 	numRows            int64
 	queryType          queryType
 	shouldSetFoundRows bool
 	onDone             NotifyFunc
 	onNext             NotifyFunc
+}
+
+func newTrackedRowIter(
+	node sql.Node,
+	iter sql.RowIter,
+	onNext NotifyFunc,
+	onDone NotifyFunc,
+) *trackedRowIter {
+	iter2, _ := iter.(sql.RowIter2)
+	return &trackedRowIter{node: node, iter: iter, iter2: iter2, onDone: onDone, onNext: onNext}
 }
 
 func (i *trackedRowIter) done() {
@@ -354,7 +387,7 @@ func (i *trackedRowIter) Next(ctx *sql.Context) (sql.Row, error) {
 }
 
 func (i *trackedRowIter) Next2(ctx *sql.Context, frame *sql.RowFrame) error {
-	err := i.iter.(sql.RowIter2).Next2(ctx, frame)
+	err := i.iter2.Next2(ctx, frame)
 	if err != nil {
 		return err
 	}

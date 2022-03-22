@@ -53,7 +53,7 @@ func pushdownFiltersAtNode(ctx *sql.Context, a *Analyzer, n sql.Node, scope *Sco
 		return nil, err
 	}
 
-	return transformPushdownFilters(ctx, a, n, scope, tableAliases)
+	return transformPushdownFilters(ctx, a, n, scope, tableAliases, indexes)
 }
 
 // pushdownSubqueryAliasFilters attempts to push conditions in filters down to
@@ -213,7 +213,7 @@ func filterPushdownAboveTablesChildSelector(c plan.TransformContext) bool {
 	return true
 }
 
-func transformPushdownFilters(ctx *sql.Context, a *Analyzer, n sql.Node, scope *Scope, tableAliases TableAliases) (sql.Node, error) {
+func transformPushdownFilters(ctx *sql.Context, a *Analyzer, n sql.Node, scope *Scope, tableAliases TableAliases, indexes indexLookupsByTable) (sql.Node, error) {
 	applyFilteredTables := func(n *plan.Filter, filters *filterSet) (sql.Node, error) {
 		return plan.TransformUpCtx(n, filterPushdownChildSelector, func(c plan.TransformContext) (sql.Node, error) {
 			switch node := c.Node.(type) {
@@ -223,7 +223,18 @@ func transformPushdownFilters(ctx *sql.Context, a *Analyzer, n sql.Node, scope *
 					return nil, err
 				}
 				return FixFieldIndexesForExpressions(ctx, a, n, scope)
-			case *plan.TableAlias, *plan.ResolvedTable, *plan.IndexedTableAccess, *plan.ValueDerivedTable:
+			case *plan.IndexedTableAccess:
+				lookup, ok := indexes[node.Name()]
+				if !ok || lookup.expr == nil {
+					return node, nil
+				}
+				handled, err := pushdownFiltersToIndex(ctx, a, node, lookup, tableAliases)
+				if err != nil {
+					return nil, err
+				}
+				filters.markFiltersHandled(handled...)
+				return node, nil
+			case *plan.TableAlias, *plan.ResolvedTable, *plan.ValueDerivedTable:
 				table, err := pushdownFiltersToTable(ctx, a, node.(NameableNode), scope, filters, tableAliases)
 				if err != nil {
 					return nil, err
@@ -318,6 +329,8 @@ func transformPushdownSubqueryAliasFilters(ctx *sql.Context, a *Analyzer, n sql.
 }
 
 // convertFiltersToIndexedAccess attempts to replace filter predicates with indexed accesses where possible
+// TODO: this function doesn't actually remove filters that have been converted to index lookups,
+//   that optimization is handled in transformPushdownFilters.
 func convertFiltersToIndexedAccess(
 	ctx *sql.Context,
 	a *Analyzer,
@@ -406,6 +419,34 @@ func convertFiltersToIndexedAccess(
 	}
 
 	return node, nil
+}
+
+// pushdownFiltersToTable attempts to push down filters to indexes that can accept them.
+func pushdownFiltersToIndex(ctx *sql.Context, a *Analyzer, idxTable *plan.IndexedTableAccess, lookup *indexLookup, tableAliases TableAliases) (handled []sql.Expression, err error) {
+	filteredIdx, ok := idxTable.Index().(sql.FilteredIndex)
+	if !ok {
+		return nil, nil
+	}
+
+	idxFilters := splitConjunction(lookup.expr)
+	if len(idxFilters) == 0 {
+		return nil, nil
+	}
+	idxFilters = normalizeExpressions(ctx, tableAliases, idxFilters...)
+
+	handled = filteredIdx.HandledFilters(idxFilters)
+	if len(handled) == 0 {
+		return nil, nil
+	}
+
+	a.Log(
+		"table %q transformed with pushdown of filters to index %s, %d filters handled of %d",
+		idxTable.Name(),
+		idxTable.Index().ID(),
+		len(handled),
+		len(idxFilters),
+	)
+	return handled, nil
 }
 
 // pushdownFiltersToTable attempts to push filters to tables that can accept them
@@ -561,7 +602,7 @@ func pushdownIndexesToTable(a *Analyzer, tableNode NameableNode, indexes map[str
 				indexLookup, ok := indexes[tableNode.Name()]
 				if ok {
 					a.Log("table %q transformed with pushdown of index", tableNode.Name())
-					return plan.NewStaticIndexedTableAccess(n, indexLookup.lookup, indexLookup.indexes[0], indexLookup.exprs), nil
+					return plan.NewStaticIndexedTableAccess(n, indexLookup.lookup, indexLookup.indexes[0], indexLookup.fields), nil
 				}
 			}
 		}

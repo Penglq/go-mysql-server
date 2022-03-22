@@ -91,6 +91,12 @@ func (n *DropUser) WithChildren(children ...sql.Node) (sql.Node, error) {
 	return n, nil
 }
 
+// CheckPrivileges implements the interface sql.Node.
+func (n *DropUser) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
+	return opChecker.UserHasPrivileges(ctx,
+		sql.NewPrivilegedOperation("", "", "", sql.PrivilegeType_CreateUser))
+}
+
 // RowIter implements the interface sql.Node.
 func (n *DropUser) RowIter(ctx *sql.Context, row sql.Row) (sql.RowIter, error) {
 	grantTables, ok := n.GrantTables.(*grant_tables.GrantTables)
@@ -100,24 +106,19 @@ func (n *DropUser) RowIter(ctx *sql.Context, row sql.Row) (sql.RowIter, error) {
 	userTableData := grantTables.UserTable().Data()
 	roleEdgesData := grantTables.RoleEdgesTable().Data()
 	for _, user := range n.Users {
-		userPk := grant_tables.UserPrimaryKey{
-			Host: user.Host,
-			User: user.Name,
-		}
-		if user.AnyHost {
-			userPk.Host = "%"
-		}
-		existingRows := userTableData.Get(userPk)
-		if len(existingRows) == 0 {
+		existingUser := grantTables.GetUser(user.Name, user.Host, false)
+		if existingUser == nil {
 			if n.IfExists {
 				continue
 			}
 			return nil, sql.ErrUserDeletionFailure.New(user.String("'"))
 		}
-		existingUser := existingRows[0].(*grant_tables.User)
 
 		//TODO: if a user is mentioned in the "mandatory_roles" (users and roles are interchangeable) system variable then they cannot be dropped
-		err := userTableData.Remove(ctx, userPk, nil)
+		err := userTableData.Remove(ctx, grant_tables.UserPrimaryKey{
+			Host: user.Host,
+			User: user.Name,
+		}, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -136,8 +137,7 @@ func (n *DropUser) RowIter(ctx *sql.Context, row sql.Row) (sql.RowIter, error) {
 			return nil, err
 		}
 	}
-	err := grantTables.Persist(ctx)
-	if err != nil {
+	if err := grantTables.Persist(ctx); err != nil {
 		return nil, err
 	}
 	return sql.RowsToRowIter(sql.Row{sql.NewOkResult(0)}), nil

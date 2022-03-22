@@ -85,6 +85,10 @@ var (
 	// node or expression is called with an invalid number of arguments.
 	ErrInvalidChildrenNumber = errors.NewKind("%T: invalid children number, got %d, expected %d")
 
+	// ErrInvalidExpressionNumber is returned when the WithExpression method of a node
+	// is called with an invalid number of arguments.
+	ErrInvalidExpressionNumber = errors.NewKind("%T: invalid expression number, got %d, expected %d")
+
 	// ErrInvalidChildType is returned when the WithChildren method of a
 	// node or expression is called with an invalid child type. This error is indicative of a bug.
 	ErrInvalidChildType = errors.NewKind("%T: invalid child type, got %T, expected %T")
@@ -337,6 +341,9 @@ var (
 	// ErrFunctionNotFound is thrown when a function is not found
 	ErrFunctionNotFound = errors.NewKind("function: '%s' not found")
 
+	// ErrTableFunctionNotFound is thrown when a table function is not found
+	ErrTableFunctionNotFound = errors.NewKind("table function: '%s' not found")
+
 	// ErrInvalidArgumentNumber is returned when the number of arguments to call a
 	// function is different from the function arity.
 	ErrInvalidArgumentNumber = errors.NewKind("function '%s' expected %v arguments, %v received")
@@ -423,7 +430,7 @@ var (
 	ErrTableAccessDeniedForUser = errors.NewKind("Access denied for user %s to table '%s'")
 
 	// ErrPrivilegeCheckFailed is returned when a user does not have the correct privileges to perform an operation.
-	ErrPrivilegeCheckFailed = errors.NewKind("%s command denied to user %s for table '%s'")
+	ErrPrivilegeCheckFailed = errors.NewKind("command denied to user %s")
 
 	// ErrGrantUserDoesNotExist is returned when a user does not exist when attempting to grant them privileges.
 	ErrGrantUserDoesNotExist = errors.NewKind("You are not allowed to create a user with GRANT")
@@ -460,6 +467,12 @@ var (
 
 	// ErrCannotCopyWindowFrame is returned when we inherit a window frame with a frame clause (replacement without parenthesis is OK)
 	ErrCannotCopyWindowFrame = errors.NewKind("cannot copy window '%s' because it has a frame clause")
+
+	// ErrUnknownWindowName is returned when an over by clause references an unknown window definition
+	ErrUnknownWindowName = errors.NewKind("named window not found: '%s'")
+
+	// ErrUnexpectedNilRow is returned when an invalid operation is applied to an empty row
+	ErrUnexpectedNilRow = errors.NewKind("unexpected nil row")
 )
 
 func CastSQLError(err error) (*mysql.SQLError, error, bool) {
