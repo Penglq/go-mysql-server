@@ -423,7 +423,6 @@ func preparedRuleSelector(n string) bool {
 		"pushdown_filters",
 		"subquery_indexes",
 		"in_subquery_indexes",
-		//"insert_topn",
 		"resolve_insert_rows",
 
 		"track_process",
@@ -435,9 +434,6 @@ func preparedRuleSelector(n string) bool {
 }
 
 // AnalyzePrepared runs a partial rule set against a previously analyzed plan.
-// - resolve the most recent table roots
-// - apply indexes after BindVar substitution
-// - add exchange nodes
 func (a *Analyzer) AnalyzePrepared(ctx *sql.Context, n sql.Node, scope *Scope) (sql.Node, error) {
 	return a.analyzeWithSelector(ctx, n, scope, SelectAll, preparedRuleSelector)
 }

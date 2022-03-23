@@ -34,8 +34,8 @@ func ApplyBindings(n sql.Node, bindings map[string]sql.Expression) (sql.Node, er
 				return val, nil
 			}
 		case *expression.GetField:
-			//TODO: GetField aliases derived from arithmetic
-			// expressions should have the arithmetic types
+			//TODO: aliases derived from arithmetic
+			// expressions on BindVars should have types
 			// re-evaluated
 			t, ok := e.Type().(sql.DeferredType)
 			if !ok {

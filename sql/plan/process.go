@@ -22,8 +22,8 @@ import (
 
 // QueryProcess represents a running query process node. It will use a callback
 // to notify when it has finished running.
-// TODO: QueryProcess -> trackedRowIter is required to dispose certain iter caches,
-// make a proper scheduler interface to perform lifecycle management, caching, and
+//TODO: QueryProcess -> trackedRowIter is required to dispose certain iter caches.
+// Make a proper scheduler interface to perform lifecycle management, caching, and
 // scan attaching
 type QueryProcess struct {
 	UnaryNode

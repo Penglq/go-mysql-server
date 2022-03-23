@@ -846,90 +846,6 @@ func TestWriteQueriesPrepared(t *testing.T, harness Harness) {
 	for _, tt := range SpatialUpdateTests {
 		runWriteQueryTest(t, harness, tt)
 	}
-	//for _, tt := range SpatialDeleteTests {
-	//	e := NewEngine(t, harness)
-	//	defer e.Close()
-	//
-	//	TestPreparedQuery(t, harness, e, tt.WriteQuery, tt.ExpectedWriteResult, nil, tt.Bindings)
-	//	// If we skipped the delete, also skip the select
-	//	if sh, ok := harness.(SkippingHarness); ok {
-	//		if sh.SkipQueryTest(tt.WriteQuery) {
-	//			t.Logf("Skipping query %s", tt.SelectQuery)
-	//			continue
-	//		}
-	//	}
-	//	TestPreparedQuery(t, harness, e, tt.SelectQuery, tt.ExpectedSelect, nil, tt.Bindings)
-	//}
-	//for _, tt := range InsertQueries {
-	//	e := NewEngine(t, harness)
-	//	defer e.Close()
-	//
-	//	TestPreparedQuery(t, harness, e, tt.WriteQuery, tt.ExpectedWriteResult, nil, tt.Bindings)
-	//	// If we skipped the delete, also skip the select
-	//	if sh, ok := harness.(SkippingHarness); ok {
-	//		if sh.SkipQueryTest(tt.WriteQuery) {
-	//			t.Logf("Skipping query %s", tt.SelectQuery)
-	//			continue
-	//		}
-	//	}
-	//	TestPreparedQuery(t, harness, e, tt.SelectQuery, tt.ExpectedSelect, nil, tt.Bindings)
-	//}
-	//for _, tt := range SpatialInsertQueries {
-	//	e := NewEngine(t, harness)
-	//	defer e.Close()
-	//
-	//	TestPreparedQuery(t, harness, e, tt.WriteQuery, tt.ExpectedWriteResult, nil, tt.Bindings)
-	//	// If we skipped the delete, also skip the select
-	//	if sh, ok := harness.(SkippingHarness); ok {
-	//		if sh.SkipQueryTest(tt.WriteQuery) {
-	//			t.Logf("Skipping query %s", tt.SelectQuery)
-	//			continue
-	//		}
-	//	}
-	//	TestPreparedQuery(t, harness, e, tt.SelectQuery, tt.ExpectedSelect, nil, tt.Bindings)
-	//}
-	//for _, tt := range ReplaceQueries {
-	//	e := NewEngine(t, harness)
-	//	defer e.Close()
-	//
-	//	TestPreparedQuery(t, harness, e, tt.WriteQuery, tt.ExpectedWriteResult, nil, tt.Bindings)
-	//	// If we skipped the delete, also skip the select
-	//	if sh, ok := harness.(SkippingHarness); ok {
-	//		if sh.SkipQueryTest(tt.WriteQuery) {
-	//			t.Logf("Skipping query %s", tt.SelectQuery)
-	//			continue
-	//		}
-	//	}
-	//	TestPreparedQuery(t, harness, e, tt.SelectQuery, tt.ExpectedSelect, nil, tt.Bindings)
-	//}
-	//for _, tt := range UpdateTests {
-	//	e := NewEngine(t, harness)
-	//	defer e.Close()
-	//
-	//	TestPreparedQuery(t, harness, e, tt.WriteQuery, tt.ExpectedWriteResult, nil, tt.Bindings)
-	//	// If we skipped the delete, also skip the select
-	//	if sh, ok := harness.(SkippingHarness); ok {
-	//		if sh.SkipQueryTest(tt.WriteQuery) {
-	//			t.Logf("Skipping query %s", tt.SelectQuery)
-	//			continue
-	//		}
-	//	}
-	//	TestPreparedQuery(t, harness, e, tt.SelectQuery, tt.ExpectedSelect, nil, tt.Bindings)
-	//}
-	//for _, tt := range SpatialUpdateTests {
-	//	e := NewEngine(t, harness)
-	//	defer e.Close()
-	//
-	//	TestPreparedQuery(t, harness, e, tt.WriteQuery, tt.ExpectedWriteResult, nil, tt.Bindings)
-	//	// If we skipped the delete, also skip the select
-	//	if sh, ok := harness.(SkippingHarness); ok {
-	//		if sh.SkipQueryTest(tt.WriteQuery) {
-	//			t.Logf("Skipping query %s", tt.SelectQuery)
-	//			continue
-	//		}
-	//	}
-	//	TestPreparedQuery(t, harness, e, tt.SelectQuery, tt.ExpectedSelect, nil, tt.Bindings)
-	//}
 }
 
 func TestDeleteErrors(t *testing.T, harness Harness) {
@@ -1672,7 +1588,6 @@ func TestScriptWithEnginePrepared(t *testing.T, e *sqle.Engine, harness Harness,
 			})
 		} else {
 			TestPreparedQueryWithContext(t, ctx, e, assertion.Query, assertion.Expected, nil, nil)
-			//TestQuery(t, harness, e, assertion.Query, assertion.Expected, nil, nil)
 		}
 	}
 }
@@ -5840,8 +5755,6 @@ func TestPrepared(t *testing.T, harness Harness) {
 
 	RunQuery(t, e, harness, "CREATE TABLE a (x int, y int, z int)")
 	RunQuery(t, e, harness, "INSERT INTO a VALUES (0,1,1), (1,1,1), (2,1,1), (3,2,2), (4,2,2)")
-	//RunQuery(t, e, harness, "CREATE TABLE mytable (i int primary key, s varchar(20))")
-	//RunQuery(t, e, harness, "INSERT INTO mytable VALUES (1, 'first row'), (2, 'second row'), (3, 'third row')")
 	for _, tt := range qtests {
 		ctx := NewContext(harness)
 		e.PrepareQuery(ctx, tt.Query)

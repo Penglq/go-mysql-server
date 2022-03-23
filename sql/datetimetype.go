@@ -230,6 +230,7 @@ func (t datetimeType) ConvertWithoutRangeCheck(v interface{}) (time.Time, error)
 		}
 		return zeroTime, ErrConvertingToTime.New(v)
 	case int64:
+		//TODO: find better way to dynamically type aliases of bindvar arithmetic
 		if value == 0 {
 			return zeroTime, nil
 		}

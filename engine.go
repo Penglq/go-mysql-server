@@ -169,7 +169,7 @@ func (e *Engine) QueryNodeWithBindings(
 		err      error
 	)
 
-	if p, ok := e.preparedDateForSession(ctx.Session); ok && p.Query == query {
+	if p, ok := e.preparedDataForSession(ctx.Session); ok && p.Query == query {
 		analyzed, err = e.analyzePreparedQuery(ctx, query, bindings)
 	} else {
 		analyzed, err = e.analyzeQuery(ctx, query, parsed, bindings)
@@ -229,9 +229,9 @@ func (e *Engine) cachePreparedStmt(ctx *sql.Context, analyzed sql.Node, query st
 	}
 }
 
-// preparedDateForSession returns the prepared data for a given session.
+// preparedDataForSession returns the prepared data for a given session.
 // Second parameter is false if the session has no prepared data.
-func (e *Engine) preparedDateForSession(sess sql.Session) (PreparedData, bool) {
+func (e *Engine) preparedDataForSession(sess sql.Session) (PreparedData, bool) {
 	if data, ok := e.PreparedData[sess.ID()]; ok {
 		return data, true
 	}
@@ -241,7 +241,7 @@ func (e *Engine) preparedDateForSession(sess sql.Session) (PreparedData, bool) {
 // preparedQuery returns the prepared plan's query string for a given
 // context's session id, or an empty string if the session has no prepared data.
 func (e *Engine) preparedQuery(ctx *sql.Context) string {
-	if data, ok := e.preparedDateForSession(ctx.Session); ok {
+	if data, ok := e.preparedDataForSession(ctx.Session); ok {
 		return data.Query
 	}
 	return ""
@@ -256,7 +256,7 @@ func (e *Engine) preparedNode(ctx *sql.Context) sql.Node {
 	return nil
 }
 
-// CloseSession clears session=specific prepared statement data
+// CloseSession deletes session specific prepared statement data
 func (e *Engine) CloseSession(ctx *sql.Context) {
 	delete(e.PreparedData, ctx.Session.ID())
 }

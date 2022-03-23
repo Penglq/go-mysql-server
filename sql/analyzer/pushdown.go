@@ -759,5 +759,4 @@ func stripDecorations(ctx *sql.Context, a *Analyzer, node sql.Node, scope *Scope
 			return node, nil
 		}
 	})
-
 }

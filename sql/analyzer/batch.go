@@ -24,7 +24,7 @@ import (
 // RuleFunc is the function to be applied in a rule.
 type RuleFunc func(*sql.Context, *Analyzer, sql.Node, *Scope, RuleSelector) (sql.Node, error)
 
-// RuleSelector filters batch or rule names from analysis.
+// RuleSelector filters analysis batches or rules by name
 type RuleSelector func(string) bool
 
 // Rule to transform nodes.

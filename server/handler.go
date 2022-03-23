@@ -15,7 +15,6 @@
 package server
 
 import (
-	"github.com/dolthub/go-mysql-server/sql/analyzer"
 	"io"
 	"net"
 	"regexp"
@@ -35,6 +34,7 @@ import (
 	sqle "github.com/dolthub/go-mysql-server"
 	"github.com/dolthub/go-mysql-server/internal/sockstate"
 	"github.com/dolthub/go-mysql-server/sql"
+	"github.com/dolthub/go-mysql-server/sql/analyzer"
 	"github.com/dolthub/go-mysql-server/sql/expression"
 	"github.com/dolthub/go-mysql-server/sql/parse"
 )

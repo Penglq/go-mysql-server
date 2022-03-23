@@ -708,7 +708,7 @@ type VersionedTable interface {
 	// WithAsOf returns a copy of this versioned table with its AsOf
 	// field set to the given value. Analogous to WithChildren.
 	WithAsOf(asOf Expression) (Node, error)
-	//AsOf returns this table's as of expression.
+	//AsOf returns this table's asof expression.
 	AsOf() Expression
 }
 
