@@ -807,7 +807,7 @@ func runWriteQueryTest(t *testing.T, harness Harness, tt WriteQueryTest) {
 		defer e.Close()
 
 		ctx := NewContextWithEngine(harness, e)
-		TestPreparedQueryWithContext(t, ctx, e, tt.WriteQuery, tt.ExpectedWriteResult, nil, tt.Bindings)
+		TestPreparedQueryWithContext(t, ctx, e, tt.WriteQuery, tt.ExpectedWriteResult, nil)
 		// If we skipped the delete, also skip the select
 		if sh, ok := harness.(SkippingHarness); ok {
 			if sh.SkipQueryTest(tt.WriteQuery) {
@@ -815,16 +815,10 @@ func runWriteQueryTest(t *testing.T, harness Harness, tt WriteQueryTest) {
 				return
 			}
 		}
-		TestPreparedQueryWithContext(t, ctx, e, tt.SelectQuery, tt.ExpectedSelect, nil, tt.Bindings)
+		TestPreparedQueryWithContext(t, ctx, e, tt.SelectQuery, tt.ExpectedSelect, nil)
 	})
 }
 func TestWriteQueriesPrepared(t *testing.T, harness Harness) {
-	for _, tt := range DeleteTests {
-		runWriteQueryTest(t, harness, tt)
-	}
-	for _, tt := range SpatialDeleteTests {
-		runWriteQueryTest(t, harness, tt)
-	}
 	for _, tt := range DeleteTests {
 		runWriteQueryTest(t, harness, tt)
 	}
@@ -1587,7 +1581,7 @@ func TestScriptWithEnginePrepared(t *testing.T, e *sqle.Engine, harness Harness,
 					assertion.ExpectedWarningMessageSubstring, assertion.SkipResultsCheck)
 			})
 		} else {
-			TestPreparedQueryWithContext(t, ctx, e, assertion.Query, assertion.Expected, nil, nil)
+			TestPreparedQueryWithContext(t, ctx, e, assertion.Query, assertion.Expected, nil)
 		}
 	}
 }
@@ -1690,7 +1684,7 @@ func TestViewsPrepared(t *testing.T, harness Harness) {
 	RunQueryWithContext(t, e, ctx, "CREATE VIEW myview2 AS SELECT * FROM myview WHERE i = 1")
 	for _, testCase := range ViewTests {
 		t.Run(testCase.Query, func(t *testing.T) {
-			TestPreparedQueryWithContext(t, ctx, e, testCase.Query, testCase.Expected, nil, testCase.Bindings)
+			TestPreparedQueryWithContext(t, ctx, e, testCase.Query, testCase.Expected, nil)
 		})
 	}
 }
@@ -1742,7 +1736,7 @@ func TestVersionedViewsPrepared(t *testing.T, harness Harness) {
 
 	for _, testCase := range VersionedViewTests {
 		t.Run(testCase.Query, func(t *testing.T) {
-			TestPreparedQueryWithContext(t, ctx, e, testCase.Query, testCase.Expected, nil, testCase.Bindings)
+			TestPreparedQueryWithContext(t, ctx, e, testCase.Query, testCase.Expected, nil)
 		})
 	}
 }
@@ -5912,7 +5906,7 @@ func TestPreparedQuery(
 			}
 		}
 		ctx := NewContextWithEngine(harness, e)
-		TestPreparedQueryWithContext(t, ctx, e, q, expected, expectedCols, bindings)
+		TestPreparedQueryWithContext(t, ctx, e, q, expected, expectedCols)
 		//TestQueryWithContext(t, ctx, e, q, expected, expectedCols, Bindings)
 	})
 }
@@ -5934,7 +5928,7 @@ func RunQueryPreparedWithCtx(
 	bindVars := make(map[string]sql.Expression)
 	var bindCnt int
 	var foundBindVar bool
-	applyBindings := func(expr sql.Expression) (sql.Expression, error) {
+	insertBindings := func(expr sql.Expression) (sql.Expression, error) {
 		switch e := expr.(type) {
 		case *expression.Literal:
 			varName := fmt.Sprintf("v%d", bindCnt)
@@ -5989,14 +5983,13 @@ func TestPreparedQueryWithContext(
 	q string,
 	expected []sql.Row,
 	expectedCols []*sql.Column,
-	bindings map[string]sql.Expression,
 ) {
 	require := require.New(t)
 	parsed, err := parse.Parse(ctx, q)
 	bindVars := make(map[string]sql.Expression)
 	var bindCnt int
 	var foundBindVar bool
-	applyBindings := func(expr sql.Expression) (sql.Expression, error) {
+	insertBindings := func(expr sql.Expression) (sql.Expression, error) {
 		switch e := expr.(type) {
 		case *expression.Literal:
 			varName := fmt.Sprintf("v%d", bindCnt)
@@ -6016,13 +6009,13 @@ func TestPreparedQueryWithContext(
 	bound, err := plan.TransformUpWithOpaque(parsed, func(node sql.Node) (sql.Node, error) {
 		switch n := node.(type) {
 		case *plan.InsertInto:
-			newSource, err := plan.TransformExpressionsUp(n.Source, applyBindings)
+			newSource, err := plan.TransformExpressionsUp(n.Source, insertBindings)
 			if err != nil {
 				return nil, err
 			}
 			return n.WithSource(newSource), nil
 		default:
-			return plan.TransformExpressionsUp(n, applyBindings)
+			return plan.TransformExpressionsUp(n, insertBindings)
 		}
 		return node, nil
 	})
