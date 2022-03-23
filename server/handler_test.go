@@ -17,6 +17,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"github.com/dolthub/go-mysql-server/sql/analyzer"
 	"net"
 	"strconv"
 	"testing"
@@ -392,6 +393,8 @@ func TestServerEventListener(t *testing.T) {
 	require.Equal(listener.Connections, 2)
 	require.Equal(listener.Disconnects, 2)
 
+	analyzer.PreparedStmtEnabled = true
+	defer func() { analyzer.PreparedStmtEnabled = false }()
 	conn3 := newConn(3)
 	_, err = handler.ComPrepare(conn3, "SELECT ?")
 	require.NoError(err)

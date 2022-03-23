@@ -15,6 +15,7 @@
 package server
 
 import (
+	"github.com/dolthub/go-mysql-server/sql/analyzer"
 	"io"
 	"net"
 	"regexp"
@@ -102,7 +103,12 @@ func (h *Handler) ComPrepare(c *mysql.Conn, query string) ([]*query.Field, error
 		return nil, err
 	}
 
-	analyzed, err := h.e.PrepareQuery(ctx, query)
+	var analyzed sql.Node
+	if analyzer.PreparedStmtEnabled {
+		analyzed, err = h.e.PrepareQuery(ctx, query)
+	} else {
+		analyzed, err = h.e.AnalyzeQuery(ctx, query)
+	}
 	if err != nil {
 		return nil, err
 	}

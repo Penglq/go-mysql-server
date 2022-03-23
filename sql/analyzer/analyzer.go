@@ -43,6 +43,16 @@ var ErrInAnalysis = errors.NewKind("error in analysis: %s")
 // ErrInvalidNodeType is thrown when the analyzer can't handle a particular kind of node type
 var ErrInvalidNodeType = errors.NewKind("%s: invalid node of type: %T")
 
+const enablePrepareStmtKey = "ENABLE_PREPARED_STATEMENTS"
+
+var PreparedStmtEnabled bool
+
+func init() {
+	if v := os.Getenv(enablePrepareStmtKey); v != "" {
+		PreparedStmtEnabled = true
+	}
+}
+
 // Builder provides an easy way to generate Analyzer with custom rules and options.
 type Builder struct {
 	preAnalyzeRules     []Rule
@@ -344,51 +354,84 @@ func (a *Analyzer) PopDebugContext() {
 
 func SelectAll(string) bool { return true }
 
+func defaultRuleSelctor(n string) bool {
+	switch n {
+	// prepared statement rules are incompatible with default rules
+	case "strip_decorations",
+		"unresolve_tables":
+		return false
+	}
+	return true
+}
+
 // Analyze applies the transformation rules to the node given. In the case of an error, the last successfully
 // transformed node is returned along with the error.
 func (a *Analyzer) Analyze(ctx *sql.Context, n sql.Node, scope *Scope) (sql.Node, error) {
-	rule_sel := func(n string) bool {
-		switch n {
-		// prepared statement rules are incompatible with default rules
-		case "strip_decorations",
-			"unresolve_tables":
-			return false
-		}
+	return a.analyzeWithSelector(ctx, n, scope, SelectAll, defaultRuleSelctor)
+}
+
+func prepareRuleSelector(n string) bool {
+	switch n {
+	case "resolve_insert_rows",
+		"insert_topn",
+		"in_subquery_indexes",
+		"track_process",
+		"parallelize",
+		"clear_warnings",
+		"strip_decorations",
+		"unresolve_tables",
+		validateResolvedRule,
+		validateOrderByRule,
+		validateGroupByRule,
+		validateSchemaSourceRule,
+		validateIndexCreationRule,
+		validateOperandsRule,
+		validateCaseResultTypesRule,
+		validateIntervalUsageRule,
+		validateExplodeUsageRule,
+		validateSubqueryColumnsRule,
+		validateUnionSchemasMatchRule,
+		validateAggregationsRule:
+		return false
+	default:
 		return true
 	}
-	return a.analyzeWithSelector(ctx, n, scope, SelectAll, rule_sel)
 }
 
 // PrepareQuery applies a partial set of transformations to a prepared plan.
 func (a *Analyzer) PrepareQuery(ctx *sql.Context, n sql.Node, scope *Scope) (sql.Node, error) {
-	rule_sel := func(n string) bool {
-		switch n {
-		case "resolve_insert_rows",
-			"insert_topn",
-			"in_subquery_indexes",
-			"track_process",
-			"parallelize",
-			"clear_warnings",
-			"strip_decorations",
-			"unresolve_tables",
-			validateResolvedRule,
-			validateOrderByRule,
-			validateGroupByRule,
-			validateSchemaSourceRule,
-			validateIndexCreationRule,
-			validateOperandsRule,
-			validateCaseResultTypesRule,
-			validateIntervalUsageRule,
-			validateExplodeUsageRule,
-			validateSubqueryColumnsRule,
-			validateUnionSchemasMatchRule,
-			validateAggregationsRule:
-			return false
-		default:
-			return true
-		}
+	return a.analyzeWithSelector(ctx, n, scope, SelectAll, prepareRuleSelector)
+}
+
+func preparedRuleSelector(n string) bool {
+	switch n {
+	case "strip_decorations",
+		"unresolve_tables",
+		"unresolve_columns",
+
+		"resolve_functions",
+		"flatten_table_aliases",
+		"pushdown_sort",
+		"pushdown_groupby_aliases",
+		"resolve_databases",
+		"resolve_tables",
+
+		"resolve_orderby_literals",
+		"qualify_columns",
+		"resolve_columns",
+
+		"pushdown_filters",
+		"subquery_indexes",
+		"in_subquery_indexes",
+		//"insert_topn",
+		"resolve_insert_rows",
+
+		"track_process",
+		"parallelize",
+		"clear_warnings":
+		return true
 	}
-	return a.analyzeWithSelector(ctx, n, scope, SelectAll, rule_sel)
+	return false
 }
 
 // AnalyzePrepared runs a partial rule set against a previously analyzed plan.
@@ -396,37 +439,7 @@ func (a *Analyzer) PrepareQuery(ctx *sql.Context, n sql.Node, scope *Scope) (sql
 // - apply indexes after BindVar substitution
 // - add exchange nodes
 func (a *Analyzer) AnalyzePrepared(ctx *sql.Context, n sql.Node, scope *Scope) (sql.Node, error) {
-	sel := func(n string) bool {
-		switch n {
-		case "strip_decorations",
-			"unresolve_tables",
-			"unresolve_columns",
-
-			"resolve_functions",
-			"flatten_table_aliases",
-			"pushdown_sort",
-			"pushdown_groupby_aliases",
-			"resolve_databases",
-			"resolve_tables",
-
-			"resolve_orderby_literals",
-			"qualify_columns",
-			"resolve_columns",
-
-			"pushdown_filters",
-			"subquery_indexes",
-			"in_subquery_indexes",
-			//"insert_topn",
-			"resolve_insert_rows",
-
-			"track_process",
-			"parallelize",
-			"clear_warnings":
-			return true
-		}
-		return false
-	}
-	return a.analyzeWithSelector(ctx, n, scope, SelectAll, sel)
+	return a.analyzeWithSelector(ctx, n, scope, SelectAll, preparedRuleSelector)
 }
 
 func (a *Analyzer) analyzeThroughBatch(ctx *sql.Context, n sql.Node, scope *Scope, until string, sel RuleSelector) (sql.Node, error) {
