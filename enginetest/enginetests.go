@@ -5948,13 +5948,13 @@ func RunQueryPreparedWithCtx(
 	bound, err := plan.TransformUpWithOpaque(parsed, func(node sql.Node) (sql.Node, error) {
 		switch n := node.(type) {
 		case *plan.InsertInto:
-			newSource, err := plan.TransformExpressionsUp(n.Source, applyBindings)
+			newSource, err := plan.TransformExpressionsUp(n.Source, insertBindings)
 			if err != nil {
 				return nil, err
 			}
 			return n.WithSource(newSource), nil
 		default:
-			return plan.TransformExpressionsUp(n, applyBindings)
+			return plan.TransformExpressionsUp(n, insertBindings)
 		}
 		return node, nil
 	})
