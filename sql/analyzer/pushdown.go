@@ -641,7 +641,7 @@ func pushdownProjectionsToTable(
 	if pt, ok := table.(sql.ProjectedTable); ok && len(fieldsByTable[tableNode.Name()]) > 0 {
 		if usedProjections[tableNode.Name()] == nil {
 			projectedFields := fieldsByTable[tableNode.Name()]
-			table = pt.WithProjection(projectedFields)
+			table = pt.WithProjections(projectedFields)
 			usedProjections[tableNode.Name()] = projectedFields
 		}
 

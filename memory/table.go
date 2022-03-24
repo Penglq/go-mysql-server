@@ -840,9 +840,9 @@ func (t *FilteredTable) WithFilters(ctx *sql.Context, filters []sql.Expression) 
 	return &nt
 }
 
-// WithProjection implements sql.ProjectedTable
-func (t *FilteredTable) WithProjection(colNames []string) sql.Table {
-	table := t.Table.WithProjection(colNames)
+// WithProjections implements sql.ProjectedTable
+func (t *FilteredTable) WithProjections(colNames []string) sql.Table {
+	table := t.Table.WithProjections(colNames)
 
 	nt := *t
 	nt.Table = table.(*Table)
@@ -854,8 +854,8 @@ func (t *FilteredTable) Projections() []string {
 	return t.projection
 }
 
-// WithProjection implements sql.ProjectedTable
-func (t *Table) WithProjection(colNames []string) sql.Table {
+// WithProjections implements sql.ProjectedTable
+func (t *Table) WithProjections(colNames []string) sql.Table {
 	if len(colNames) == 0 {
 		return t
 	}

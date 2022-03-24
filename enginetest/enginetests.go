@@ -1566,6 +1566,11 @@ func TestScriptWithEnginePrepared(t *testing.T, e *sqle.Engine, harness Harness,
 	}
 
 	for _, assertion := range assertions {
+		if sh, ok := harness.(SkippingHarness); ok {
+			if sh.SkipQueryTest(assertion.Query) {
+				t.Skip()
+			}
+		}
 		if assertion.ExpectedErr != nil {
 			t.Run(assertion.Query, func(t *testing.T) {
 				AssertErr(t, e, harness, assertion.Query, assertion.ExpectedErr)
@@ -5571,30 +5576,27 @@ func TestPersist(t *testing.T, harness Harness, newPersistableSess func(ctx *sql
 func TestPrepared(t *testing.T, harness Harness) {
 	qtests := []QueryTest{
 		{
-			Query: "select x, sum(y) from a where x > ? group by ? order by x",
+			Query: "select y, sum(y) from a where x > ? group by y order by x",
 			Bindings: map[string]sql.Expression{
 				"v1": expression.NewLiteral(int64(2), sql.Int64),
-				"v2": expression.NewGetField(1, sql.Int64, "y", true),
 			},
 			Expected: []sql.Row{
-				{4, float64(4)},
+				{2, float64(4)},
 			},
 		},
 		{
-			Query: "select x, sum(y) from a where x > ? group by ? order by x",
+			Query: "select y, sum(y) from a where x > ? group by y order by x",
 			Bindings: map[string]sql.Expression{
 				"v1": expression.NewLiteral(int64(2), sql.Int64),
-				"v2": expression.NewGetField(1, sql.Int64, "y", true),
 			},
 			Expected: []sql.Row{
-				{4, float64(4)},
+				{2, float64(4)},
 			},
 		},
 		{
-			Query: "select x, sum(y) from a where x > ? group by ? order by x",
+			Query: "select x, sum(y) from a where x > ? group by x order by x",
 			Bindings: map[string]sql.Expression{
 				"v1": expression.NewLiteral(int64(0), sql.Int64),
-				"v2": expression.NewGetField(0, sql.Int64, "x", true),
 			},
 			Expected: []sql.Row{
 				{1, float64(1)},
@@ -5604,24 +5606,22 @@ func TestPrepared(t *testing.T, harness Harness) {
 			},
 		},
 		{
-			Query: "select x, sum(y) from a where x > ? group by ? order by x",
+			Query: "select y, sum(y) from a where x > ? group by y order by x",
 			Bindings: map[string]sql.Expression{
 				"v1": expression.NewLiteral(int64(3), sql.Int64),
-				"v2": expression.NewGetField(1, sql.Int64, "y", true),
 			},
 			Expected: []sql.Row{
-				{4, float64(2)},
+				{2, float64(2)},
 			},
 		},
 		{
-			Query: "select x, sum(y) from a where x > ? group by ? order by x",
+			Query: "select y, sum(y) from a where x > ? group by y order by x",
 			Bindings: map[string]sql.Expression{
 				"v1": expression.NewLiteral(int64(1), sql.Int64),
-				"v2": expression.NewGetField(1, sql.Int64, "y", true),
 			},
 			Expected: []sql.Row{
-				{2, float64(1)},
-				{4, float64(4)},
+				{1, float64(1)},
+				{2, float64(4)},
 			},
 		},
 		{

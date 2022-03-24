@@ -264,7 +264,7 @@ func transferProjections(from, to *plan.ResolvedTable) sql.Node {
 		return to
 	}
 
-	newTable := pt.WithProjection(projections)
+	newTable := pt.WithProjections(projections)
 	return plan.NewResolvedTable(newTable, to.Database, to.AsOf)
 }
 
