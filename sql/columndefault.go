@@ -111,20 +111,17 @@ func (e *ColumnDefaultValue) Resolved() bool {
 
 // String implements sql.Expression
 func (e *ColumnDefaultValue) String() string {
-	//TODO: currently (2+2)/2 will, when output as a string, give (2 + 2 / 2), which is clearly wrong
 	if e == nil {
-		return ""
+		return "NULL"
 	}
 
-	// https://dev.mysql.com/doc/refman/8.0/en/data-type-defaults.html
-	// The default value specified in a DEFAULT clause can be a literal constant or an expression. With one exception,
-	// enclose expression default values within parentheses to distinguish them from literal constant default values.
 	if e.literal {
 		return e.Expression.String()
-		// CURRENT_TIMESTAMP() is an exception to enclosing expression default in parentheses
-	} else if e.Expression.String() == "CURRENT_TIMESTAMP()" || e.Expression.String() == "NOW()" {
+	}
+	switch e.Expression.String() {
+	case "CURRENT_TIMESTAMP()", "NOW()", "CURRENT_TIMESTAMP":
 		return "CURRENT_TIMESTAMP"
-	} else {
+	default:
 		return fmt.Sprintf("(%s)", e.Expression.String())
 	}
 }
