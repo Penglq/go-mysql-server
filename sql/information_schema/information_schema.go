@@ -25,7 +25,6 @@ import (
 	"github.com/dolthub/vitess/go/sqltypes"
 	"github.com/dolthub/vitess/go/vt/sqlparser"
 
-	. "github.com/dolthub/go-mysql-server/sql"
 	"github.com/dolthub/go-mysql-server/sql/analyzer"
 	"github.com/dolthub/go-mysql-server/sql/grant_tables"
 	"github.com/dolthub/go-mysql-server/sql/parse"
@@ -885,12 +884,8 @@ func columnsRowIter(ctx *Context, cat Catalog) (RowIter, error) {
 				}
 				ordinalPos = uint64(i + 1)
 
-				if c.Default.String() == "" {
+				if c.Default.String() == "NULL" {
 					colDefault = nil
-				} else if c.Default.IsLiteral() && c.Default.String() == "NULL" {
-					colDefault = nil
-				} else if c.Default.IsLiteral() && c.Default.String() == `""` {
-					colDefault = ""
 				} else {
 					colDefault = c.Default.String()
 				}
