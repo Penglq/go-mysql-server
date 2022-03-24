@@ -885,10 +885,14 @@ func columnsRowIter(ctx *Context, cat Catalog) (RowIter, error) {
 				}
 				ordinalPos = uint64(i + 1)
 
-				if c.Default.String() == "NULL" {
+				if c.Default.String() == "" {
 					colDefault = nil
+				} else if c.Default.IsLiteral() && c.Default.String() == "NULL" {
+					colDefault = nil
+				} else if c.Default.IsLiteral() && c.Default.String() == `""` {
+					colDefault = ""
 				} else {
-					colDefault = c.Default.String()
+					colDefault = fmt.Sprintf("%s", c.Default)
 				}
 
 				rows = append(rows, Row{
