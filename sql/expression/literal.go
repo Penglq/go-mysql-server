@@ -63,7 +63,7 @@ func (p *Literal) String() string {
 	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
 		return fmt.Sprintf("%d", v)
 	case string:
-		return fmt.Sprintf("%q", v)
+		return fmt.Sprintf("%s", v)
 	case []byte:
 		return "BLOB"
 	case nil:
